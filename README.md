@@ -2,15 +2,6 @@
 This is a fork repo from YTLite but adds more tweaks similar to YTLitePlus for those who can't build IPA or The app is unusable.
 If you have any problems, feel free to open issues!
 
-> [!WARNING]
-> Starting from YTLite 5.2, you have to be a member in [his Boosty](https://boosty.to/dayanch96) or [his website](https://dvntm.com/account). 
-> Otherwise, you **CAN'T** use YTLite.
-> If you can't / don't want to be a member, uses YTLite version 5.2b4.
-
-**Thanks for 300 forks!🥳🎉🙏**
-
-**NOTE:** Before you open a new issue, please check in [FAQs](FAQs.md) first and make sure your issue doesn't have in it.
-
 ## Main features
 - [YTLite](https://github.com/dayanch96/YTLite) - eg. Download Videos, No ads, Background Playback
 - [YTSilentVote](https://github.com/PoomSmart/YTSilentVote) - Remove like/dislike votes
@@ -55,10 +46,3 @@ If you have any problems, feel free to open issues!
     <li>Wait for the build to finish. You can download the YTLitePlusEXTRA IPA from the releases section of your forked repo. (If you can't find the releases section, go to your forked repo and add /releases to the URL, i.e., github.com/yourusername/YTLitePlusEXTRA/releases.)</li>
   </ol>
 </details>
-
-## Supported YouTube version
-<ul>
-   <li><strong>Latest confirmed:</strong> 21.29.3</li>
-   <li><strong>Date tested:</strong> Aug 1, 2026</li>
-   <li><strong>YTLite:</strong> 5.2.2</li>
-</ul>
