@@ -104,6 +104,9 @@ jobs:
 
       - name: Clone YouPiP
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
+
+      - name: Clone YTUHD
+        run: git clone --quiet --depth=1 --recurse-submodules https://github.com/PoomSmart/YTUHD.git
            
       - name: Clone Return-YouTube-Dislikes
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/Return-YouTube-Dislikes.git
@@ -146,7 +149,15 @@ jobs:
         run: |
           cd YouPiP
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-          mv packages/*.deb ${{ github.workspace }}/youpip.deb    
+          mv packages/*.deb ${{ github.workspace }}/youpip.deb
+
+      - name: Build YTUHD
+        run: |
+          cd YTUHD
+          brew install meson ninja
+          make libvpx dav1d
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOAD=1
+          mv packages/*.deb ${{ github.workspace }}/ytuhd.deb
 
       - name: Build Return-YouTube-Dislikes
         run: |
