@@ -311,7 +311,6 @@ jobs:
           git clone \
             --quiet \
             --depth=1 \
-            --branch "$YTKACE_VERSION" \
             https://github.com/itzzace/ytkace.git \
             YTKACE-Sideload
 
