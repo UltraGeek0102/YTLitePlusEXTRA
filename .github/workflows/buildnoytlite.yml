@@ -264,6 +264,7 @@ jobs:
               asset["browser_download_url"]
               for asset in data["assets"]
               if asset["name"].lower().endswith(".deb")
+              and "ytkace" in asset["name"].lower()
               and "rootless" in asset["name"].lower()
           ]
 
