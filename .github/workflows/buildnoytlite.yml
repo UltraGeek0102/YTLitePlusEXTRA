@@ -284,6 +284,8 @@ jobs:
 
           echo "YTKACE $YTKACE_VERSION downloaded successfully."
           dpkg-deb --info ytkace.deb
+          echo "=== YTKACE DEB CONTENTS ==="
+          dpkg-deb -c ytkace.deb | grep -Ei 'YTKACE|YTLite|\.dylib'
           
       - name: Inject Tweaks Into IPA
         run: |
