@@ -1,4 +1,4 @@
-name: Build IPA WITHOUT YTLITE
+name: Build Custom YouTube IPA with Optional YTKACE
 
 on:
   workflow_dispatch:
@@ -363,6 +363,18 @@ jobs:
         if: ${{ inputs.youquality }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouQuality.git
 
+      - name: Clone YouSpeed
+        run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouSpeed.git
+
+      - name: Clone YouMute
+        run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouMute.git
+
+      - name: Clone YouLoop
+        run: git clone --quiet --depth=1 https://github.com/bhackel/YouLoop.git
+
+      - name: Clone YouShare
+        run: git clone --quiet --depth=1 https://github.com/Tonwalter888/YouShare.git
+
       - name: Build YouPiP
         if: ${{ inputs.youpip }}
         run: |
@@ -467,6 +479,34 @@ jobs:
           cd YouQuality
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb "${{ github.workspace }}/youquality.deb"
+
+      - name: Build YouSpeed
+        run: |
+          set -euo pipefail
+          cd YouSpeed
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb "${{ github.workspace }}/youspeed.deb"
+
+      - name: Build YouMute
+        run: |
+          set -euo pipefail
+          cd YouMute
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb "${{ github.workspace }}/youmute.deb"
+
+      - name: Build YouLoop
+        run: |
+          set -euo pipefail
+          cd YouLoop
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb "${{ github.workspace }}/youloop.deb"
+
+      - name: Build YouShare
+        run: |
+          set -euo pipefail
+          cd YouShare
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb "${{ github.workspace }}/youshare.deb"
 
       - name: Extract YTKACE
         if: ${{ inputs.ytkace }}
