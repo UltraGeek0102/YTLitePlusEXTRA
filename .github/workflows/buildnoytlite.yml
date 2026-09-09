@@ -95,24 +95,21 @@ permissions:
   contents: read
 
 jobs:
-  build-ytkace:
-    name: Build YTKACE
-    uses: ./.github/workflows/build-deb.yml
-
   package:
     name: Build Custom IPA
-    needs: build-ytkace
     runs-on: macos-latest
 
     steps:
-      - name: Checkout YTKACE
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v6
 
-      - name: Download Built YTKACE
-        uses: actions/download-artifact@v8
-        with:
-          name: YTKACE-deb-rootless
-          path: ytkace-packages
+      - name: Clone YTKACE Source
+        if: ${{ inputs.ytkace }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth=1 --recurse-submodules \
+            https://github.com/itzzace/ytkace.git \
+            YTKACE-src
 
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
@@ -203,6 +200,30 @@ jobs:
             's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' \
             "$THEOS/bin/convert_xml_plist.sh" || true
 
+      - name: Build YTKACE
+        if: ${{ inputs.ytkace }}
+        run: |
+          set -euo pipefail
+
+          cd YTKACE-src
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          cd "${{ github.workspace }}"
+
+          mkdir -p ytkace-packages
+
+          YTKACE_DEB="$(find YTKACE-src/packages -type f -name "*.deb" -print -quit)"
+
+          if [ -z "$YTKACE_DEB" ]; then
+            echo "::error::YTKACE build did not produce a .deb package."
+            exit 1
+          fi
+
+          echo "Built YTKACE package:"
+          echo "$YTKACE_DEB"
+
+          cp "$YTKACE_DEB" ytkace-packages/ytkace.deb
+          ls -lh ytkace-packages/ytkace.deb
+
       - name: Download IPA From MEGA
         if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') }}
         env:
@@ -290,7 +311,11 @@ jobs:
           PY
           )"
 
-          YTKACE_VERSION="$(awk '/^Version:/ {print $2}' control)"
+          if [ "${{ inputs.ytkace }}" = "true" ]; then
+            YTKACE_VERSION="$(awk '/^Version:/ {print $2}' YTKACE-src/control)"
+          else
+            YTKACE_VERSION="disabled"
+          fi
 
           echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
           echo "YTKACE_VERSION=$YTKACE_VERSION" >> "$GITHUB_ENV"
@@ -546,7 +571,7 @@ jobs:
 
           echo "Integrating YTKACE into clean YouTube IPA..."
 
-          bash Scripts/sideload-repack.sh \
+          bash YTKACE-src/Scripts/sideload-repack.sh \
             youtube.ipa \
             ytkace-root/var/jb/Library/MobileSubstrate/DynamicLibraries/YTKACE.dylib \
             "$output"
@@ -610,14 +635,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          tweaks="OpenYouTubeSafariExtension.appex"
+          tweaks=("OpenYouTubeSafariExtension.appex")
 
           echo "Injecting additional tweaks:"
 
-          for f in *.deb; do
-            [ -e "$f" ] || continue
-            echo "  $f"
-            tweaks="$tweaks $f"
+          for f in \
+            youpip.deb \
+            ytuhd.deb \
+            ryd.deb \
+            ygs.deb \
+            ytvo.deb \
+            ytabconfig.deb \
+            uncapavplayer.deb \
+            demc.deb \
+            alderis.deb \
+            youslider.deb \
+            ytweaks.deb \
+            ytnativeshare.deb \
+            volboostyt.deb \
+            youquality.deb \
+            youspeed.deb \
+            youmute.deb \
+            youloop.deb \
+            youshare.deb
+          do
+            if [ -f "$f" ]; then
+              echo "  $f"
+              tweaks+=("$f")
+            fi
           done
 
           if [ "${{ inputs.ytkace }}" = "true" ]; then
@@ -629,7 +674,7 @@ jobs:
           cyan \
             -i YouTube_Base.ipa \
             -o "$output" \
-            -uwef $tweaks \
+            -uwef "${tweaks[@]}" \
             -n "${{ inputs.display_name }}" \
             -b "${{ inputs.bundle_id }}"
 
@@ -647,6 +692,51 @@ jobs:
           ls -lh "$output"
 
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
+
+      - name: Check Final IPA For YTLite
+        run: |
+          set -euo pipefail
+
+          rm -rf final-check
+          mkdir -p final-check
+
+          unzip -q "${{ steps.inject.outputs.ipa }}" -d final-check
+
+          APP="$(find final-check/Payload -maxdepth 1 -type d -name "*.app" -print -quit)"
+
+          if [ -z "$APP" ]; then
+            echo "::error::App bundle was not found in the final IPA."
+            exit 1
+          fi
+
+          echo "=== YTKACE FILES ==="
+          find "$APP" -iname "*ytkace*" -print | sort || true
+
+          echo
+          echo "=== YTLITE-NAMED FILES ==="
+          YTLITE_FILES="$(find "$APP" -iname "*ytlite*" -print | sort || true)"
+
+          if [ -n "$YTLITE_FILES" ]; then
+            echo "::warning::YTLite-named files were found in the final IPA:"
+            echo "$YTLITE_FILES"
+          else
+            echo "No YTLite-named files found."
+          fi
+
+          EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleExecutable" \
+              "$APP/Info.plist"
+          )"
+
+          echo
+          echo "=== MAIN EXECUTABLE YTLITE LOAD COMMAND CHECK ==="
+
+          if otool -L "$APP/$EXECUTABLE" | grep -i "YTLite"; then
+            echo "::warning::The main executable contains a YTLite load command."
+          else
+            echo "No YTLite load command found in the main executable."
+          fi
 
       - name: Upload Custom IPA
         uses: actions/upload-artifact@v7
