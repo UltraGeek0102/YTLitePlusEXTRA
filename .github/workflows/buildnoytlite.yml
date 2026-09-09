@@ -230,7 +230,7 @@ jobs:
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytweaks.deb
 
-      - name: Download Latest YTKACE
+      - name: Prepare Latest YTKACE
         if: ${{ inputs.ytkace }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -269,33 +269,96 @@ jobs:
           ')
 
           echo "Latest YTKACE version: $YTKACE_VERSION"
-          echo "Downloading rootless YTKACE package..."
+
+          mkdir -p ytkace-package
+
+          echo "Downloading YTKACE package..."
 
           curl --fail --location \
             --retry 3 \
             --retry-delay 2 \
             "$YTKACE_URL" \
-            --output ytkace.deb
+            --output ytkace-package/ytkace.deb
 
-          if ! dpkg-deb --info ytkace.deb >/dev/null 2>&1; then
+          if ! dpkg-deb --info ytkace-package/ytkace.deb >/dev/null 2>&1; then
             echo "::error::Downloaded YTKACE package is not a valid .deb."
             exit 1
           fi
 
-          echo "YTKACE $YTKACE_VERSION downloaded successfully."
-          dpkg-deb --info ytkace.deb
-          echo "=== YTKACE DEB CONTENTS ==="
-          dpkg-deb -c ytkace.deb | grep -Ei 'YTKACE|YTLite|\.dylib'
+          echo "Extracting YTKACE..."
+
+          mkdir -p ytkace-package/extracted
+          dpkg-deb -x \
+            ytkace-package/ytkace.deb \
+            ytkace-package/extracted
+
+          YTKACE_DYLIB=$(find \
+            ytkace-package/extracted \
+            -type f \
+            -name "YTKACE.dylib" \
+            -print \
+            -quit)
+
+          if [ -z "$YTKACE_DYLIB" ]; then
+            echo "::error::YTKACE.dylib was not found inside the package."
+            exit 1
+          fi
+
+          cp "$YTKACE_DYLIB" ytkace-package/YTKACE.dylib
+
+          echo "Downloading YTKACE source matching $YTKACE_VERSION..."
+
+          git clone \
+            --quiet \
+            --depth=1 \
+            --branch "$YTKACE_VERSION" \
+            https://github.com/itzzace/ytkace.git \
+            YTKACE-Sideload
+
+          echo "YTKACE prepared successfully."
+          echo "Dylib:"
+          ls -lh ytkace-package/YTKACE.dylib
           
-      - name: Inject Tweaks Into IPA
+      - name: Inject Standard Tweaks Into IPA
         run: |
           tweaks="OpenYouTubeSafariExtension.appex"
 
+          echo "Standard tweaks being injected:"
+
           for f in *.deb; do
+            [ -e "$f" ] || continue
+            echo "  $f"
             tweaks="$tweaks $f"
           done
-          
-          cyan -i youtube.ipa -o YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa -uwef $tweaks -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
+
+          cyan \
+            -i youtube.ipa \
+            -o YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
+            -uwef $tweaks \
+            -n "${{ inputs.display_name }}" \
+            -b "${{ inputs.bundle_id }}"
+
+      - name: Integrate YTKACE
+        if: ${{ inputs.ytkace }}
+        run: |
+          echo "Integrating YTKACE using the official sideload repacker..."
+
+          chmod +x YTKACE-Sideload/Scripts/sideload-repack.sh
+          chmod +x YTKACE-Sideload/Scripts/sign-bundle.sh
+
+          bash YTKACE-Sideload/Scripts/sideload-repack.sh \
+            YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
+            ytkace-package/YTKACE.dylib \
+            YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa
+
+          echo "YTKACE integration complete."
+
+      - name: Finalize IPA Without YTKACE
+        if: ${{ !inputs.ytkace }}
+        run: |
+          mv \
+            YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
+            YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa
 
       - name: Create a Draft Release
         uses: softprops/action-gh-release@v3
