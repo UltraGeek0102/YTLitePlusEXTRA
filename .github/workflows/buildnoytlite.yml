@@ -26,12 +26,6 @@ on:
         required: false
         type: boolean
 
-      ytkace:
-        description: "Integrate YTKACE"
-        default: false
-        required: false
-        type: boolean
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -47,7 +41,7 @@ jobs:
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,demc,ytkace,ytvid
+          exclude_inputs: bundle_id,display_name,demc,ytvid
           
       - name: Download and Validate IPA
         run: |
@@ -66,7 +60,7 @@ jobs:
           echo "YT_VERSION=$(grep -A 1 '<key>CFBundleVersion</key>' ytextracted/Payload/YouTube.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')" >> $GITHUB_ENV
 
       - name: Install Dependencies
-        run: brew install make ldid swiftlint dpkg
+        run: brew install make ldid swiftlint
 
       - name: Set PATH Environment Variables
         run: |
@@ -229,136 +223,18 @@ jobs:
           cd YTweaks
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytweaks.deb
-
-      - name: Prepare Latest YTKACE
-        if: ${{ inputs.ytkace }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "Fetching latest YTKACE release..."
-
-          release_json=$(curl --fail --silent --show-error \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/itzzace/ytkace/releases/latest")
-
-          YTKACE_VERSION=$(echo "$release_json" | python3 -c \
-            'import json,sys; print(json.load(sys.stdin)["tag_name"])')
-
-          YTKACE_URL=$(echo "$release_json" | python3 -c '
-          import json
-          import sys
-
-          data = json.load(sys.stdin)
-
-          matches = [
-              asset["browser_download_url"]
-              for asset in data["assets"]
-              if asset["name"].lower().endswith(".deb")
-              and "ytkace" in asset["name"].lower()
-              and "rootless" in asset["name"].lower()
-          ]
-
-          if not matches:
-              raise SystemExit(
-                  "No rootless YTKACE .deb was found in the latest release."
-              )
-
-          print(matches[0])
-          ')
-
-          echo "Latest YTKACE version: $YTKACE_VERSION"
-
-          mkdir -p ytkace-package
-
-          echo "Downloading YTKACE package..."
-
-          curl --fail --location \
-            --retry 3 \
-            --retry-delay 2 \
-            "$YTKACE_URL" \
-            --output ytkace-package/ytkace.deb
-
-          if ! dpkg-deb --info ytkace-package/ytkace.deb >/dev/null 2>&1; then
-            echo "::error::Downloaded YTKACE package is not a valid .deb."
-            exit 1
-          fi
-
-          echo "Extracting YTKACE..."
-
-          mkdir -p ytkace-package/extracted
-          dpkg-deb -x \
-            ytkace-package/ytkace.deb \
-            ytkace-package/extracted
-
-          YTKACE_DYLIB=$(find \
-            ytkace-package/extracted \
-            -type f \
-            -name "YTKACE.dylib" \
-            -print \
-            -quit)
-
-          if [ -z "$YTKACE_DYLIB" ]; then
-            echo "::error::YTKACE.dylib was not found inside the package."
-            exit 1
-          fi
-
-          cp "$YTKACE_DYLIB" ytkace-package/YTKACE.dylib
-
-          echo "Downloading YTKACE sideload scripts..."
-
-          git clone \
-            --quiet \
-            --depth=1 \
-            https://github.com/itzzace/ytkace.git \
-            YTKACE-Sideload
-
-          echo "YTKACE prepared successfully."
-          echo "Dylib:"
-          ls -lh ytkace-package/YTKACE.dylib
           
-      - name: Inject Standard Tweaks Into IPA
+      - name: Inject Tweaks Into IPA
         run: |
           tweaks="OpenYouTubeSafariExtension.appex"
+                    for f in *.deb; do
 
-          echo "Standard tweaks being injected:"
 
-          for f in *.deb; do
-            [ -e "$f" ] || continue
-            echo "  $f"
-            tweaks="$tweaks $f"
-          done
-
-          cyan \
-            -i youtube.ipa \
-            -o YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
-            -uwef $tweaks \
-            -n "${{ inputs.display_name }}" \
-            -b "${{ inputs.bundle_id }}"
-
-      - name: Integrate YTKACE
-        if: ${{ inputs.ytkace }}
-        run: |
-          echo "Integrating YTKACE using the official sideload repacker..."
-
-          chmod +x YTKACE-Sideload/Scripts/sideload-repack.sh
-          chmod +x YTKACE-Sideload/Scripts/sign-bundle.sh
-
-          bash YTKACE-Sideload/Scripts/sideload-repack.sh \
-            YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
-            ytkace-package/YTKACE.dylib \
-            YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa
-
-          echo "YTKACE integration complete."
-
-      - name: Finalize IPA Without YTKACE
-        if: ${{ !inputs.ytkace }}
-        run: |
-          mv \
-            YouTube_StandardTweaks_${{ env.YT_VERSION }}.ipa \
-            YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa
-
+                    tweaks="$tweaks $f"
+                    done
+          
+                    cyan -i youtube.ipa -o YTLitePlusEXTRA_NoYTLite_${{ env.YT_VERSION }}.ipa -uwef $tweaks -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
+            
       - name: Create a Draft Release
         uses: softprops/action-gh-release@v3
         with:
