@@ -306,7 +306,7 @@ jobs:
 
           cp "$YTKACE_DYLIB" ytkace-package/YTKACE.dylib
 
-          echo "Downloading YTKACE source matching $YTKACE_VERSION..."
+          echo "Downloading YTKACE sideload scripts..."
 
           git clone \
             --quiet \
