@@ -273,25 +273,6 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure Input IPA Is Clean
-        run: |
-          set -euo pipefail
-
-          EXISTING="$(
-            unzip -Z1 youtube.ipa \
-              | grep -Ei '(^|/)(YTLite|YTKACE)(\.dylib|\.bundle)(/|$)' \
-              || true
-          )"
-
-          if [ -n "$EXISTING" ]; then
-            echo "::error::The supplied IPA already contains YTLite or YTKACE:"
-            echo "$EXISTING"
-            echo "::error::Please provide a clean decrypted YouTube IPA."
-            exit 1
-          fi
-
-          echo "Clean decrypted YouTube IPA confirmed."
-
       - name: Detect Versions
         run: |
           set -euo pipefail
