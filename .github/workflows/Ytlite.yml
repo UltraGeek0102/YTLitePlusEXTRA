@@ -11,7 +11,7 @@ on:
 
       ytlite_deb_url:
         description: "URL to the YTLite .deb file"
-        default: ""
+        default: "https://files.catbox.moe/kb9duh.deb"
         required: true
         type: string
         
