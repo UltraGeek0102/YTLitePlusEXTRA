@@ -33,6 +33,66 @@ on:
         required: true
         type: string
 
+      youpip:
+        description: "Integrate YouPiP"
+        default: true
+        required: false
+        type: boolean
+
+      ytuhd:
+        description: "Integrate YTUHD"
+        default: true
+        required: false
+        type: boolean
+
+      ryd:
+        description: "Integrate Return-YouTube-Dislikes"
+        default: true
+        required: false
+        type: boolean
+
+      abconfig:
+        description: "Integrate YTABConfig"
+        default: true
+        required: false
+        type: boolean
+
+      youquality:
+        description: "Integrate YouQuality"
+        default: true
+        required: false
+        type: boolean
+
+      ytnovote:
+        description: "Integrate YTSilentVote"
+        default: true
+        required: false
+        type: boolean
+
+      youshare:
+        description: "Integrate YouShare"
+        default: true
+        required: false
+        type: boolean
+
+      gonerino:
+        description: "Integrate Gonerino"
+        default: true
+        required: false
+        type: boolean
+
+      ytweaks:
+        description: "Integrate YTweaks"
+        default: true
+        required: false
+        type: boolean
+
+      yougetcaption:
+        description: "Integrate YouGetCaption"
+        default: true
+        required: false
+        type: boolean
+
       demc:
         description: "Integrate DontEatMyContent"
         default: true
@@ -45,6 +105,24 @@ on:
         required: false
         type: boolean
 
+      uncappedavplayer:
+        description: "Integrate UncappedAVPlayer"
+        default: false
+        required: false
+        type: boolean
+
+      youslider:
+        description: "Integrate YouSlider"
+        default: false
+        required: false
+        type: boolean
+
+      native_share:
+        description: "Integrate youtube-native-share"
+        default: false
+        required: false
+        type: boolean
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -52,7 +130,7 @@ concurrency:
 jobs:
   build:
     name: Build YTLitePlusEXTRA IPA
-    runs-on: macos-latest
+    runs-on: xcode-27
     permissions:
       contents: write
 
@@ -60,7 +138,7 @@ jobs:
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,ytlite_version,demc,volboost
+          exclude_inputs: bundle_id,display_name,ytlite_version,youpip,ytuhd,ryd,abconfig,youquality,ytnovote,youshare,gonerino,ytweaks,yougetcaption,demc,volboost,uncappedavplayer,youslider,native_share
 
       - name: Install MEGA downloader
         if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') || startsWith(inputs.ytlite_deb_url, 'https://mega.nz/') }}
@@ -89,13 +167,85 @@ jobs:
             exit 1
           fi
 
-      - name: Get YouTube Version 
+      - name: Get YouTube Version
         run: |
           unzip -q youtube.ipa -d ytextracted
-          echo "YT_VERSION=$(grep -A 1 '<key>CFBundleVersion</key>' ytextracted/Payload/YouTube.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')" >> $GITHUB_ENV
 
+          YT_VERSION=$(/usr/libexec/PlistBuddy \
+            -c "Print :CFBundleVersion" \
+            "ytextracted/Payload/YouTube.app/Info.plist")
+
+          echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
+          echo "Detected YouTube version: $YT_VERSION"
+
+      - name: Remove and Validate UIDesignRequiresCompatibility
+        run: |
+          PLIST="ytextracted/Payload/YouTube.app/Info.plist"
+
+          echo "Checking for UIDesignRequiresCompatibility..."
+
+          if /usr/libexec/PlistBuddy -c "Print :UIDesignRequiresCompatibility" "$PLIST" >/dev/null 2>&1; then
+            echo "UIDesignRequiresCompatibility found. Removing it..."
+            /usr/libexec/PlistBuddy -c "Delete :UIDesignRequiresCompatibility" "$PLIST"
+          else
+            echo "UIDesignRequiresCompatibility is already absent."
+          fi
+
+          echo "Validating modified Info.plist..."
+
+          if /usr/libexec/PlistBuddy -c "Print :UIDesignRequiresCompatibility" "$PLIST" >/dev/null 2>&1; then
+            echo "::error::UIDesignRequiresCompatibility is still present in extracted Info.plist."
+            exit 1
+          fi
+
+          echo "UIDesignRequiresCompatibility removed from extracted Info.plist."
+
+          echo "Repacking modified YouTube IPA..."
+
+          rm -f youtube.ipa
+
+          (
+            cd ytextracted
+            zip -qry -y ../youtube.ipa Payload
+          )
+
+          echo "Checking rebuilt IPA integrity..."
+
+          if ! unzip -tq youtube.ipa >/dev/null 2>&1; then
+            echo "::error::Rebuilt youtube.ipa is invalid or corrupted."
+            exit 1
+          fi
+
+          echo "Extracting Info.plist from rebuilt IPA for final validation..."
+
+          rm -f /tmp/youtube-final-Info.plist
+
+          unzip -p youtube.ipa \
+            "Payload/YouTube.app/Info.plist" \
+            > /tmp/youtube-final-Info.plist
+
+          if [ ! -s /tmp/youtube-final-Info.plist ]; then
+            echo "::error::Could not extract Info.plist from rebuilt IPA."
+            exit 1
+          fi
+
+          echo "Validating UIDesignRequiresCompatibility inside rebuilt IPA..."
+
+          if /usr/libexec/PlistBuddy -c "Print :UIDesignRequiresCompatibility" \
+            /tmp/youtube-final-Info.plist >/dev/null 2>&1; then
+            echo "::error::UIDesignRequiresCompatibility is still present inside rebuilt youtube.ipa."
+            exit 1
+          fi
+
+          echo "✅ UIDesignRequiresCompatibility is absent from rebuilt youtube.ipa."
+          echo "✅ Modified IPA successfully repacked and validated."
+      
       - name: Install Dependencies
         run: brew install make ldid meson ninja dpkg
+
+      - name: Install Go
+        if: ${{ inputs.gonerino }}
+        run: brew install go
 
       - name: Set PATH Environment Variables
         run: |
@@ -116,19 +266,46 @@ jobs:
         uses: actions/cache@v6
         with:
           path: theos
-          key: 26.5-SDK-${{ env.THEOS_COMMIT }}
+          key: 27.0-SDK-${{ env.THEOS_COMMIT }}
 
       - name: Setup Theos
         if: ${{ steps.cache-theos.outputs.cache-hit != 'true' }}
         run: |
-            git clone --quiet --depth=1 --recurse-submodules https://github.com/theos/theos.git
-            git clone --quiet --depth=1 -n --filter=tree:0 https://github.com/Tonwalter888/iOS-SDKs.git
-            cd iOS-SDKs
-            git sparse-checkout set --no-cone iPhoneOS26.5.sdk
-            git checkout --quiet
-            mv *.sdk "$THEOS/sdks"
-            cd ${{ github.workspace }}/theos/vendor/logos
-            git checkout a62370066a97e36d59b200a9fa10c5091f5e8972
+          git clone --quiet --depth=1 --recurse-submodules https://github.com/theos/theos.git
+
+          cd "$THEOS/vendor/logos"
+          git checkout a62370066a97e36d59b200a9fa10c5091f5e8972
+
+      - name: Setup Latest Stable iOS SDK
+        run: |
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+
+          echo "Xcode version:"
+          xcodebuild -version
+
+          echo "Detected iOS SDK: $SDK_VERSION"
+          echo "SDK path: $SDK_PATH"
+
+          if [ "$SDK_VERSION" != "27.0" ]; then
+            echo "::error::Expected iOS 27.0 SDK but found $SDK_VERSION."
+            exit 1
+          fi
+
+          rm -rf "$THEOS/sdks"
+          mkdir -p "$THEOS/sdks"
+
+          ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
+
+          echo "Theos SDKs:"
+          ls -la "$THEOS/sdks"
+
+          if [ ! -d "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk" ]; then
+            echo "::error::Failed to configure iOS $SDK_VERSION SDK for Theos."
+            exit 1
+          fi
+
+          echo "✅ Theos configured with iOS $SDK_VERSION SDK."
             
       - name: Clone headers
         run: |
@@ -202,24 +379,30 @@ jobs:
           mv *.appex ${{ github.workspace }}
 
       - name: Clone YouPiP
+        if: ${{ inputs.youpip }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
     
       - name: Clone YTUHD
+        if: ${{ inputs.ytuhd }}
         run: git clone --quiet --depth=1 --recurse https://github.com/PoomSmart/YTUHD.git
            
       - name: Clone Return-YouTube-Dislikes
+        if: ${{ inputs.ryd }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/Return-YouTube-Dislikes.git
 
       - name: Clone YouGroupSettings
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouGroupSettings.git
            
       - name: Clone YTVideoOverlay
+        if: ${{ inputs.youpip || inputs.ytuhd || inputs.youquality }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YTVideoOverlay.git
           
       - name: Clone YTABConfig
+        if: ${{ inputs.abconfig }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YTABConfig.git
                   
       - name: Clone YouQuality
+        if: ${{ inputs.youquality }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouQuality.git
 
       - name: Clone DontEatMyContent
@@ -227,31 +410,52 @@ jobs:
         run: git clone --quiet --depth=1 https://github.com/therealFoxster/DontEatMyContent.git
 
       - name: Clone YTSilentVote
+        if: ${{ inputs.ytnovote }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YTSilentVote.git
 
       - name: Clone YouShare
+        if: ${{ inputs.youshare }}
         run: git clone --quiet --depth=1 https://github.com/Tonwalter888/YouShare.git
 
       - name: Clone Gonerino
+        if: ${{ inputs.gonerino }}
         run: git clone --quiet --depth=1 https://github.com/castdrian/Gonerino.git
 
       - name: Clone YTweaks
+        if: ${{ inputs.ytweaks }}
         run: git clone --quiet --depth=1 https://github.com/fosterbarnes/YTweaks.git
 
       - name: Clone YouGetCaption
+        if: ${{ inputs.yougetcaption }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouGetCaption.git
+
+      - name: Clone UncappedAVPlayer
+        if: ${{ inputs.uncappedavplayer }}
+        run: git clone --quiet --depth=1 https://github.com/PoomSmart/UncappedAVPlayer.git
+
+      - name: Clone YouSlider
+        if: ${{ inputs.youslider }}
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouSlider.git
+          wget --no-verbose --quiet https://github.com/Tonwalter888/Tonwalter888.github.io/raw/refs/heads/main/debs/alderis.deb
+
+      - name: Clone youtube-native-share
+        if: ${{ inputs.native_share }}
+        run: git clone --quiet --depth=1 https://github.com/jkhsjdhjs/youtube-native-share.git
 
       - name: Clone VolumeBoostYT
         if: ${{ inputs.volboost }}
         run: git clone --quiet --depth=1 https://github.com/VasirakCalgux/VolumeBoostYT.git
         
       - name: Build YouPiP
+        if: ${{ inputs.youpip }}
         run: |
           cd YouPiP
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/youpip.deb    
 
       - name: Build YTUHD
+        if: ${{ inputs.ytuhd }}
         run: |
           cd YTUHD
           make libvpx dav1d
@@ -259,6 +463,7 @@ jobs:
           mv packages/*.deb ${{ github.workspace }}/ytuhd.deb
 
       - name: Build Return-YouTube-Dislikes
+        if: ${{ inputs.ryd }}
         run: |
           cd Return-YouTube-Dislikes
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
@@ -271,18 +476,21 @@ jobs:
           mv packages/*.deb ${{ github.workspace }}/ygs.deb
 
       - name: Build YTVideoOverlay
+        if: ${{ inputs.youpip || inputs.ytuhd || inputs.youquality }}
         run: |
           cd YTVideoOverlay
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytvo.deb
 
       - name: Build YTABConfig
+        if: ${{ inputs.abconfig }}
         run: |
           cd YTABConfig
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytabconfig.deb
 
       - name: Build YouQuality
+        if: ${{ inputs.youquality }}
         run: |
           cd YouQuality
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
@@ -296,34 +504,61 @@ jobs:
           mv packages/*.deb ${{ github.workspace }}/demc.deb
 
       - name: Build YTSilentVote
+        if: ${{ inputs.ytnovote }}
         run: |
           cd YTSilentVote
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytnovote.deb  
 
       - name: Build YouShare
+        if: ${{ inputs.youshare }}
         run: |
           cd YouShare
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/youshare.deb
           
       - name: Build Gonerino
+        if: ${{ inputs.gonerino }}
         run: |
           cd Gonerino
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/gonerino.deb
 
       - name: Build YouGetCaption
+        if: ${{ inputs.yougetcaption }}
         run: |
           cd YouGetCaption
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ygc.deb
 
       - name: Build YTweaks
+        if: ${{ inputs.ytweaks }}
         run: |
           cd YTweaks
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mv packages/*.deb ${{ github.workspace }}/ytweaks.deb
+
+      - name: Build UncappedAVPlayer
+        if: ${{ inputs.uncappedavplayer }}
+        run: |
+          cd UncappedAVPlayer
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          mv packages/*.deb ${{ github.workspace }}/uncapavplayer.deb
+
+      - name: Build YouSlider
+        if: ${{ inputs.youslider }}
+        run: |
+          cd YouSlider
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb ${{ github.workspace }}/youslider.deb
+
+      - name: Build youtube-native-share
+        if: ${{ inputs.native_share }}
+        run: |
+          cd youtube-native-share
+          git clone --quiet --depth=1 https://github.com/protocolbuffers/protobuf.git
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          mv packages/*.deb ${{ github.workspace }}/ytnativeshare.deb
 
       - name: Build VolumeBoostYT
         if: ${{ inputs.volboost }}
