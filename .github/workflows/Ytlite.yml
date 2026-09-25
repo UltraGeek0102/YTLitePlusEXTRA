@@ -354,6 +354,27 @@ jobs:
         run: |
           wget "$YTLITE_DEB_URL" --quiet --no-verbose -O ytlite.deb
 
+      - name: Validate YTLite DEB
+        run: |
+          echo "Validating downloaded YTLite DEB..."
+
+          if [ ! -s ytlite.deb ]; then
+            echo "::error::YTLite DEB is missing or empty."
+            exit 1
+          fi
+
+          if ! dpkg-deb --info ytlite.deb >/dev/null 2>&1; then
+            echo "::error::Downloaded file is not a valid Debian package."
+            exit 1
+          fi
+
+          PACKAGE_NAME="$(dpkg-deb -f ytlite.deb Package)"
+          PACKAGE_VERSION="$(dpkg-deb -f ytlite.deb Version)"
+
+          echo "Package: $PACKAGE_NAME"
+          echo "Version: $PACKAGE_VERSION"
+          echo "✅ YTLite DEB validated successfully."
+
       - name: Get YTLite Version
         run: |
           if [ -n "${{ inputs.ytlite_version }}" ]; then
@@ -381,10 +402,10 @@ jobs:
       - name: Clone YouPiP
         if: ${{ inputs.youpip }}
         run: git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
-    
+
       - name: Clone YTUHD
         if: ${{ inputs.ytuhd }}
-        run: git clone --quiet --depth=1 --recurse https://github.com/PoomSmart/YTUHD.git
+        run: git clone --quiet --depth=1 --recurse-submodules https://github.com/PoomSmart/YTUHD.git
            
       - name: Clone Return-YouTube-Dislikes
         if: ${{ inputs.ryd }}
@@ -577,6 +598,49 @@ jobs:
           
           cyan -i youtube.ipa -o YTLitePlusEXTRA_${{ env.YT_VERSION }}_v${{ env.YTLITE_VERSION }}.ipa -uwef $tweaks -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
 
+      - name: Validate Final IPA
+        run: |
+          FINAL_IPA="YTLitePlusEXTRA_${YT_VERSION}_v${YTLITE_VERSION}.ipa"
+
+          echo "Validating final IPA: $FINAL_IPA"
+
+          if [ ! -f "$FINAL_IPA" ]; then
+            echo "::error::Final IPA was not created."
+            exit 1
+          fi
+
+          if [ ! -s "$FINAL_IPA" ]; then
+            echo "::error::Final IPA is empty."
+            exit 1
+          fi
+
+          if ! unzip -tq "$FINAL_IPA" >/dev/null 2>&1; then
+            echo "::error::Final IPA is corrupted or invalid."
+            exit 1
+          fi
+
+          rm -f /tmp/final-youtube-Info.plist
+
+          unzip -p "$FINAL_IPA" \
+            "Payload/YouTube.app/Info.plist" \
+            > /tmp/final-youtube-Info.plist
+
+          if [ ! -s /tmp/final-youtube-Info.plist ]; then
+            echo "::error::Could not extract YouTube Info.plist from final IPA."
+            exit 1
+          fi
+
+          if /usr/libexec/PlistBuddy \
+            -c "Print :UIDesignRequiresCompatibility" \
+            /tmp/final-youtube-Info.plist >/dev/null 2>&1; then
+
+            echo "::error::UIDesignRequiresCompatibility is present in the final IPA."
+            exit 1
+          fi
+
+          echo "✅ Final IPA archive is valid."
+          echo "✅ UIDesignRequiresCompatibility is absent from final IPA."
+      
       - name: Create a Draft Release
         uses: softprops/action-gh-release@v3
         with:
