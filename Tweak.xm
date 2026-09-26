@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.2.3 — Selective Liquid Glass + current watch action bar
+// YTLiquidGlass v3.2.4 — Selective Liquid Glass + current watch action bar
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -3157,72 +3157,6 @@ static BOOL YTLGTryPresentNativeSheetMenu(
 
 
 #pragma mark - Native Liquid Glass channel/profile action buttons
-
-static const void *kYTLGNativeButtonSignatureKey =
-    &kYTLGNativeButtonSignatureKey;
-
-static void YTLGCollectTitledButtons(
-    UIView *view,
-    NSMutableArray<UIButton *> *buttons
-) {
-    if (!view) return;
-
-    for (UIView *subview in view.subviews) {
-        if (subview.hidden ||
-            subview.alpha <= 0.01 ||
-            CGRectIsEmpty(subview.bounds)) {
-            continue;
-        }
-
-        if ([subview isKindOfClass:UIButton.class]) {
-            UIButton *button = (UIButton *)subview;
-
-            NSString *title =
-                [button titleForState:UIControlStateNormal]
-                ?: button.currentTitle
-                ?: button.titleLabel.text;
-
-            // Only title-bearing action pills. This intentionally ignores
-            // avatar/icon-only controls and navigation/player buttons.
-            if (title.length > 0 &&
-                button.bounds.size.height >= 28.0 &&
-                button.bounds.size.height <= 64.0 &&
-                button.bounds.size.width >= 56.0) {
-
-                [buttons addObject:button];
-            }
-        }
-
-        YTLGCollectTitledButtons(
-            subview,
-            buttons
-        );
-    }
-}
-
-static NSString *
-YTLGNativeButtonSignature(
-    UIButton *button,
-    BOOL prominent
-) {
-    NSString *title =
-        [button titleForState:UIControlStateNormal]
-        ?: button.currentTitle
-        ?: button.titleLabel.text
-        ?: @"";
-
-    UIImage *image =
-        [button imageForState:UIControlStateNormal]
-        ?: button.currentImage;
-
-    return [NSString stringWithFormat:
-        @"%@|%lu|%d|%d",
-        title,
-        (unsigned long)image.hash,
-        prominent,
-        button.enabled
-    ];
-}
 
 #pragma mark - Watch-page metadata/action Liquid Glass
 
