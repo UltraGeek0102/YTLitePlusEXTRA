@@ -600,7 +600,6 @@ jobs:
       - name: Build YTLiquidGlass
         if: ${{ inputs.liquidglass }}
         run: |
-          cd YTLiquidGlass
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
           mv packages/*.deb ${{ github.workspace }}/ytliquidglass.deb
           
