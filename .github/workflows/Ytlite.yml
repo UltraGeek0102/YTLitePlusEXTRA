@@ -5,7 +5,7 @@ on:
     inputs:
       ipa_url:
         description: "URL to the decrypted IPA file"
-        default: ""
+        default: "https://files.catbox.moe/xky0ag.ipa"
         required: true
         type: string
 
