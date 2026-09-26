@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.7 — Native tab bar + top navigation glass
+// YTLiquidGlass v0.8 — Native tab bar + top navigation + search glass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -1356,6 +1356,147 @@ static void YTLGRefreshTopNavigationSoon(
 
 %end
 
+
+#pragma mark - Search box Liquid Glass
+
+static const void *kYTLGSearchGlassKey = &kYTLGSearchGlassKey;
+
+static UIVisualEffect *YTLGSearchGlassEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass = NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+
+            // The real YouTube search box remains responsible for interaction.
+            effect.interactive = NO;
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static UIVisualEffectView *
+YTLGSearchGlassView(UIView *searchBox) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            searchBox,
+            kYTLGSearchGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGSearchGlassEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.SearchBox";
+
+        [searchBox insertSubview:glass
+                        atIndex:0];
+
+        objc_setAssociatedObject(
+            searchBox,
+            kYTLGSearchGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void YTLGUpdateSearchGlass(id container) {
+    UIView *searchBox = (UIView *)container;
+
+    if (!searchBox ||
+        !searchBox.window ||
+        CGRectIsEmpty(searchBox.bounds)) {
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGSearchGlassView(searchBox);
+
+    if (!CGRectEqualToRect(
+            glass.frame,
+            searchBox.bounds)) {
+
+        glass.frame = searchBox.bounds;
+    }
+
+    glass.layer.cornerRadius =
+        searchBox.bounds.size.height * 0.5;
+
+    // Remove YouTube's flat grey pill so the actual system glass can show.
+    searchBox.opaque = NO;
+    searchBox.backgroundColor =
+        UIColor.clearColor;
+
+    // Keep the material behind YouTube's label / cancel / icon content.
+    [searchBox sendSubviewToBack:glass];
+}
+
+static void YTLGRefreshSearchGlassSoon(id container) {
+    if (!container) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            UIView *view = (UIView *)container;
+
+            if (view.window) {
+                YTLGUpdateSearchGlass(container);
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassSearchBox
+
+%hook YTSearchBoxView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateSearchGlass(self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (((UIView *)self).window) {
+        YTLGRefreshSearchGlassSoon(self);
+    }
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+
+    if (((UIView *)self).superview) {
+        YTLGRefreshSearchGlassSoon(self);
+    }
+}
+
+%end
+
+%end
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         if (NSClassFromString(@"YTPivotBarView") &&
@@ -1369,6 +1510,12 @@ static void YTLGRefreshTopNavigationSoon(
             NSClassFromString(@"YTRightNavigationButtons")) {
 
             %init(YTLiquidGlassTopNavigation);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTSearchBoxView")) {
+
+            %init(YTLiquidGlassSearchBox);
         }
     }
 }
