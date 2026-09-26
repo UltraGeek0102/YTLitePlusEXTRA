@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.0 — Consolidated non-player Liquid Glass + global pills/subscription controls
+// YTLiquidGlass v3.0.1 — Consolidated non-player Liquid Glass + global pills/subscription controls
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -4142,14 +4142,12 @@ YTLGUpdateGenericPillGlass(
         button.selected ||
         button.highlighted;
 
-    UIGlassEffect *effect = nil;
-
     if (@available(iOS 26.0, *)) {
         if ([glass.effect
                 isKindOfClass:
                     NSClassFromString(@"UIGlassEffect")]) {
 
-            effect =
+            UIGlassEffect *effect =
                 (UIGlassEffect *)glass.effect;
 
             effect.tintColor =
