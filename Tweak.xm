@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v1.0 — Tab bar + header + full search + player glass
+// YTLiquidGlass v1.2 — Tab bar + header + full search + compact back + app sheets
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -62,13 +62,16 @@
 @end
 
 
-// Search and player declarations are intentionally minimal. The implementation
-// discovers private child views at runtime so YouTube/YTVideoOverlay keep
-// ownership of their controls and behavior.
 @interface YTSearchViewController : UIViewController
 @end
 
-@interface YTMainAppControlsOverlayView : UIView
+// YouTube's normal navigation/header surface used on results and pushed pages.
+@interface YTHeaderView : UIView
+@end
+
+
+@interface YTActionSheetDialogViewController : UIViewController
+- (UIView *)actionSheetView;
 @end
 
 static const void *kYTLGNativeBarKey = &kYTLGNativeBarKey;
@@ -1717,12 +1720,12 @@ YTLGRefreshActiveSearchSoon(id object) {
 %end
 
 
-#pragma mark - Search back button Liquid Glass
+#pragma mark - Compact search-entry back button glass
 
 static const void *kYTLGSearchBackGlassKey =
     &kYTLGSearchBackGlassKey;
 
-static UIVisualEffect *YTLGSmallControlGlassEffect(void) {
+static UIVisualEffect *YTLGCompactControlGlassEffect(void) {
     if (@available(iOS 26.0, *)) {
         Class glassClass =
             NSClassFromString(@"UIGlassEffect");
@@ -1746,7 +1749,7 @@ static UIVisualEffect *YTLGSmallControlGlassEffect(void) {
             UIBlurEffectStyleSystemChromeMaterial];
 }
 
-static id YTLGObjectIvar(
+static id YTLGReadObjectIvar(
     id object,
     const char *name
 ) {
@@ -1768,116 +1771,23 @@ static id YTLGObjectIvar(
     return nil;
 }
 
-static UIView *YTLGFindDescendantOfClass(
-    UIView *view,
-    Class targetClass
-) {
-    if (!view || !targetClass) return nil;
-
-    if ([view isKindOfClass:targetClass]) {
-        return view;
-    }
-
-    for (UIView *subview in view.subviews) {
-        UIView *match =
-            YTLGFindDescendantOfClass(
-                subview,
-                targetClass
-            );
-
-        if (match) return match;
-    }
-
-    return nil;
-}
-
 static UIButton *
-YTLGSearchBackButton(
+YTLGSearchControllerBackButton(
     YTSearchViewController *controller
 ) {
-    if (!controller) return nil;
-
-    id ivarButton =
-        YTLGObjectIvar(
+    id value =
+        YTLGReadObjectIvar(
             controller,
             "_backButton"
         );
 
-    if ([ivarButton isKindOfClass:UIButton.class]) {
-        return (UIButton *)ivarButton;
-    }
-
-    // Fallback for YouTube versions where the ivar name changes: find the
-    // visible icon-sized UIButton immediately to the left of YTSearchBarView.
-    UIView *root = controller.view;
-    Class searchClass =
-        NSClassFromString(@"YTSearchBarView");
-
-    UIView *searchField =
-        YTLGFindDescendantOfClass(
-            root,
-            searchClass
-        );
-
-    if (!searchField) return nil;
-
-    CGRect searchFrame =
-        [root convertRect:searchField.bounds
-                 fromView:searchField];
-
-    NSMutableArray<UIView *> *stack =
-        [NSMutableArray arrayWithObject:root];
-
-    UIButton *best = nil;
-    CGFloat bestDistance = CGFLOAT_MAX;
-
-    while (stack.count > 0) {
-        UIView *candidate = stack.lastObject;
-        [stack removeLastObject];
-
-        for (UIView *subview in candidate.subviews) {
-            [stack addObject:subview];
-
-            if (![subview
-                    isKindOfClass:UIButton.class] ||
-                subview.hidden ||
-                subview.alpha <= 0.01) {
-                continue;
-            }
-
-            CGRect frame =
-                [root convertRect:subview.bounds
-                        fromView:subview];
-
-            if (frame.size.width <= 0.0 ||
-                frame.size.height <= 0.0 ||
-                frame.size.width > 64.0 ||
-                frame.size.height > 64.0) {
-                continue;
-            }
-
-            if (CGRectGetMidX(frame) >=
-                CGRectGetMinX(searchFrame)) {
-                continue;
-            }
-
-            CGFloat distance =
-                CGRectGetMinX(searchFrame) -
-                CGRectGetMaxX(frame);
-
-            if (distance >= -8.0 &&
-                distance < bestDistance) {
-                best = (UIButton *)subview;
-                bestDistance = distance;
-            }
-        }
-    }
-
-    return best;
+    return [value isKindOfClass:UIButton.class]
+        ? (UIButton *)value
+        : nil;
 }
 
 static UIVisualEffectView *
-YTLGSearchBackGlassView(UIButton *button) {
+YTLGCompactBackGlassView(UIButton *button) {
     UIVisualEffectView *glass =
         objc_getAssociatedObject(
             button,
@@ -1888,7 +1798,7 @@ YTLGSearchBackGlassView(UIButton *button) {
         glass =
             [[UIVisualEffectView alloc]
                 initWithEffect:
-                    YTLGSmallControlGlassEffect()];
+                    YTLGCompactControlGlassEffect()];
 
         glass.userInteractionEnabled = NO;
         glass.opaque = NO;
@@ -1912,11 +1822,13 @@ YTLGSearchBackGlassView(UIButton *button) {
     return glass;
 }
 
-static void YTLGUpdateSearchBackGlass(
+static void YTLGUpdateCompactSearchBack(
     YTSearchViewController *controller
 ) {
     UIButton *button =
-        YTLGSearchBackButton(controller);
+        YTLGSearchControllerBackButton(
+            controller
+        );
 
     if (!button ||
         !button.window ||
@@ -1929,7 +1841,7 @@ static void YTLGUpdateSearchBackGlass(
     UIView *host = button.superview;
 
     UIVisualEffectView *glass =
-        YTLGSearchBackGlassView(button);
+        YTLGCompactBackGlassView(button);
 
     if (glass.superview != host) {
         [glass removeFromSuperview];
@@ -1941,11 +1853,9 @@ static void YTLGUpdateSearchBackGlass(
         [button convertRect:button.bounds
                      toView:host];
 
-    CGFloat side =
-        MAX(44.0,
-            MIN(48.0,
-                MAX(buttonFrame.size.width,
-                    buttonFrame.size.height)));
+    // Compact native-sized circle: intentionally smaller than v1.0's 44–48pt
+    // platter so it visually balances the search field and mic control.
+    CGFloat side = 36.0;
 
     CGRect frame =
         CGRectMake(
@@ -1969,7 +1879,7 @@ static void YTLGUpdateSearchBackGlass(
            belowSubview:button];
 }
 
-static void YTLGRefreshSearchBackSoon(
+static void YTLGRefreshCompactSearchBackSoon(
     YTSearchViewController *controller
 ) {
     if (!controller) return;
@@ -1978,7 +1888,7 @@ static void YTLGRefreshSearchBackSoon(
         dispatch_get_main_queue(),
         ^{
             if (controller.view.window) {
-                YTLGUpdateSearchBackGlass(
+                YTLGUpdateCompactSearchBack(
                     controller
                 );
             }
@@ -1993,13 +1903,13 @@ static void YTLGRefreshSearchBackSoon(
 - (void)viewWillLayoutSubviews {
     %orig;
 
-    YTLGUpdateSearchBackGlass(self);
+    YTLGUpdateCompactSearchBack(self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
 
-    YTLGRefreshSearchBackSoon(self);
+    YTLGRefreshCompactSearchBackSoon(self);
 }
 
 %end
@@ -2007,56 +1917,44 @@ static void YTLGRefreshSearchBackSoon(
 %end
 
 
-#pragma mark - Video player top-controls Liquid Glass
+#pragma mark - Normal header left/back Liquid Glass
 
-static const void *kYTLGPlayerLeftGlassKey =
-    &kYTLGPlayerLeftGlassKey;
+static const void *kYTLGHeaderLeftGlassKey =
+    &kYTLGHeaderLeftGlassKey;
 
-static const void *kYTLGPlayerRightGlassKey =
-    &kYTLGPlayerRightGlassKey;
-
-static BOOL YTLGControlHasVisibleContent(
-    UIControl *control
+static BOOL YTLGButtonHasDrawnContent(
+    UIButton *button
 ) {
-    if (!control ||
-        control.hidden ||
-        control.alpha <= 0.01) {
+    if (!button ||
+        button.hidden ||
+        button.alpha <= 0.01) {
         return NO;
     }
 
-    if ([control isKindOfClass:UIButton.class]) {
-        UIButton *button =
-            (UIButton *)control;
-
-        if (button.currentImage ||
-            button.currentTitle.length > 0 ||
-            button.currentBackgroundImage) {
-            return YES;
-        }
+    if (button.currentImage ||
+        button.currentTitle.length > 0 ||
+        button.currentBackgroundImage) {
+        return YES;
     }
 
-    for (UIView *subview in control.subviews) {
+    for (UIView *subview in button.subviews) {
         if (subview.hidden ||
             subview.alpha <= 0.01 ||
             CGRectIsEmpty(subview.bounds)) {
             continue;
         }
 
-        if ([subview
-                isKindOfClass:UIImageView.class]) {
+        if ([subview isKindOfClass:UIImageView.class]) {
             if (((UIImageView *)subview).image) {
                 return YES;
             }
-
             continue;
         }
 
-        if ([subview
-                isKindOfClass:UILabel.class]) {
+        if ([subview isKindOfClass:UILabel.class]) {
             if (((UILabel *)subview).text.length > 0) {
                 return YES;
             }
-
             continue;
         }
 
@@ -2066,12 +1964,10 @@ static BOOL YTLGControlHasVisibleContent(
     return NO;
 }
 
-static void YTLGCollectPlayerControls(
+static void YTLGCollectHeaderButtons(
     UIView *view,
-    NSMutableArray<UIControl *> *controls
+    NSMutableArray<UIButton *> *buttons
 ) {
-    if (!view) return;
-
     for (UIView *subview in view.subviews) {
         if (subview.hidden ||
             subview.alpha <= 0.01 ||
@@ -2084,91 +1980,42 @@ static void YTLGCollectPlayerControls(
         BOOL iconSized =
             size.width > 0.0 &&
             size.height > 0.0 &&
-            size.width <= 72.0 &&
-            size.height <= 72.0;
+            size.width <= 64.0 &&
+            size.height <= 64.0;
 
-        if ([subview
-                isKindOfClass:UIControl.class] &&
+        if ([subview isKindOfClass:UIButton.class] &&
             iconSized &&
-            YTLGControlHasVisibleContent(
-                (UIControl *)subview)) {
+            YTLGButtonHasDrawnContent(
+                (UIButton *)subview)) {
 
-            [controls addObject:
-                (UIControl *)subview];
+            [buttons addObject:
+                (UIButton *)subview];
 
             continue;
         }
 
-        YTLGCollectPlayerControls(
+        YTLGCollectHeaderButtons(
             subview,
-            controls
+            buttons
         );
     }
-}
-
-static UIView *
-YTLGTopPlayerControlsContainer(
-    YTMainAppControlsOverlayView *overlay
-) {
-    id value =
-        YTLGObjectIvar(
-            overlay,
-            "_topControlsAccessibilityContainerView"
-        );
-
-    if ([value isKindOfClass:UIView.class]) {
-        return (UIView *)value;
-    }
-
-    @try {
-        value =
-            [overlay valueForKey:
-                @"_topControlsAccessibilityContainerView"];
-    } @catch (__unused NSException *exception) {
-        value = nil;
-    }
-
-    return [value isKindOfClass:UIView.class]
-        ? (UIView *)value
-        : nil;
-}
-
-static UIView *
-YTLGDirectBranchUnderAncestor(
-    UIView *view,
-    UIView *ancestor
-) {
-    if (!view || !ancestor) return nil;
-
-    UIView *branch = view;
-
-    while (branch.superview &&
-           branch.superview != ancestor) {
-        branch = branch.superview;
-    }
-
-    return branch.superview == ancestor
-        ? branch
-        : nil;
 }
 
 static UIVisualEffectView *
-YTLGPlayerGroupGlass(
-    YTMainAppControlsOverlayView *overlay,
-    const void *key,
-    NSString *identifier
+YTLGHeaderLeftGlassView(
+    YTHeaderView *header
 ) {
     UIVisualEffectView *glass =
         objc_getAssociatedObject(
-            overlay,
-            key
+            header,
+            kYTLGHeaderLeftGlassKey
         );
 
     if (!glass) {
         glass =
             [[UIVisualEffectView alloc]
                 initWithEffect:
-                    YTLGSmallControlGlassEffect()];
+                    YTLGCompactControlGlassEffect()];
 
         glass.userInteractionEnabled = NO;
         glass.opaque = NO;
@@ -2179,11 +2026,319 @@ YTLGPlayerGroupGlass(
             kCACornerCurveContinuous;
 
         glass.accessibilityIdentifier =
-            identifier;
+            @"YTLiquidGlass.HeaderLeft";
 
         objc_setAssociatedObject(
-            overlay,
-            key,
+            header,
+            kYTLGHeaderLeftGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+
+        [header insertSubview:glass
+                     atIndex:0];
+    }
+
+    return glass;
+}
+
+static void YTLGUpdateHeaderLeftGlass(
+    YTHeaderView *header
+) {
+    if (!header ||
+        !header.window ||
+        CGRectIsEmpty(header.bounds)) {
+        return;
+    }
+
+    NSMutableArray<UIButton *> *buttons =
+        [NSMutableArray array];
+
+    YTLGCollectHeaderButtons(
+        header,
+        buttons
+    );
+
+    CGFloat midX =
+        header.bounds.size.width * 0.5;
+
+    UIButton *bestButton = nil;
+    CGRect bestFrame = CGRectNull;
+    CGFloat bestMinX = CGFLOAT_MAX;
+
+    for (UIButton *button in buttons) {
+        CGRect frame =
+            [header convertRect:button.bounds
+                       fromView:button];
+
+        // Only consider real left-edge navigation actions. Anything near the
+        // center is a title/control; anything on the right is handled by the
+        // existing YTRightNavigationButtons glass.
+        if (CGRectGetMidX(frame) >= midX ||
+            CGRectGetMinX(frame) >
+                header.bounds.size.width * 0.28) {
+            continue;
+        }
+
+        // Avoid giant/invisible touch targets.
+        if (frame.size.width <= 0.0 ||
+            frame.size.height <= 0.0 ||
+            frame.size.width > 64.0 ||
+            frame.size.height > 64.0) {
+            continue;
+        }
+
+        if (CGRectGetMinX(frame) < bestMinX) {
+            bestMinX = CGRectGetMinX(frame);
+            bestButton = button;
+            bestFrame = frame;
+        }
+    }
+
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            header,
+            kYTLGHeaderLeftGlassKey
+        );
+
+    if (!bestButton ||
+        CGRectIsNull(bestFrame)) {
+        glass.hidden = YES;
+        return;
+    }
+
+    // A compact 36pt circle matches the dedicated search-entry back button.
+    CGFloat side = 36.0;
+
+    CGRect frame =
+        CGRectMake(
+            CGRectGetMidX(bestFrame) -
+                side * 0.5,
+            CGRectGetMidY(bestFrame) -
+                side * 0.5,
+            side,
+            side
+        );
+
+    CGRect safe =
+        UIEdgeInsetsInsetRect(
+            header.bounds,
+            header.safeAreaInsets
+        );
+
+    if (!CGRectIsEmpty(safe)) {
+        // If the proposed circle would float into the status bar, clamp it
+        // back into the safe header region.
+        if (CGRectGetMinY(frame) <
+            CGRectGetMinY(safe)) {
+
+            frame.origin.y =
+                CGRectGetMinY(safe);
+        }
+    }
+
+    glass =
+        YTLGHeaderLeftGlassView(header);
+
+    glass.hidden = NO;
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        side * 0.5;
+
+    // Keep the original button/action above the material.
+    [header insertSubview:glass
+             belowSubview:bestButton];
+}
+
+%group YTLiquidGlassHeaderLeft
+
+%hook YTHeaderView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateHeaderLeftGlass(self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                YTLGUpdateHeaderLeftGlass(self);
+            }
+        );
+    }
+}
+
+%end
+
+%end
+
+
+#pragma mark - Normal app action-sheet Liquid Glass
+
+static const void *kYTLGActionSheetGlassKey =
+    &kYTLGActionSheetGlassKey;
+
+static BOOL YTLGClassNameLooksMediaRelated(
+    NSString *className
+) {
+    if (className.length == 0) return NO;
+
+    NSString *lower =
+        className.lowercaseString;
+
+    NSArray<NSString *> *blocked =
+        @[
+            @"player",
+            @"watch",
+            @"reel",
+            @"short",
+            @"fullscreen",
+            @"playback",
+            @"videooverlay"
+        ];
+
+    for (NSString *needle in blocked) {
+        if ([lower containsString:needle]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL YTLGControllerTreeLooksMediaRelated(
+    UIViewController *controller
+) {
+    NSMutableSet *visited =
+        [NSMutableSet set];
+
+    UIViewController *cursor = controller;
+
+    // Walk presenting/parent/navigation context conservatively. If anything in
+    // the chain looks like a player/Shorts/watch controller, do not glass the
+    // sheet. This preserves the user's request to keep media UI untouched.
+    for (NSUInteger depth = 0;
+         cursor && depth < 12;
+         depth++) {
+
+        NSValue *token =
+            [NSValue valueWithNonretainedObject:cursor];
+
+        if ([visited containsObject:token]) {
+            break;
+        }
+
+        [visited addObject:token];
+
+        NSString *name =
+            NSStringFromClass(
+                cursor.class
+            );
+
+        if (YTLGClassNameLooksMediaRelated(name)) {
+            return YES;
+        }
+
+        if (cursor.navigationController &&
+            cursor.navigationController != cursor) {
+
+            NSString *navName =
+                NSStringFromClass(
+                    cursor.navigationController.class
+                );
+
+            if (YTLGClassNameLooksMediaRelated(
+                    navName)) {
+                return YES;
+            }
+
+            for (UIViewController *vc
+                    in cursor.navigationController.viewControllers) {
+
+                if (YTLGClassNameLooksMediaRelated(
+                        NSStringFromClass(vc.class))) {
+                    return YES;
+                }
+            }
+        }
+
+        if (cursor.presentingViewController) {
+            cursor =
+                cursor.presentingViewController;
+            continue;
+        }
+
+        if (cursor.parentViewController) {
+            cursor =
+                cursor.parentViewController;
+            continue;
+        }
+
+        break;
+    }
+
+    return NO;
+}
+
+static UIVisualEffect *YTLGActionSheetEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:
+                @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static UIVisualEffectView *
+YTLGActionSheetGlassView(
+    YTActionSheetDialogViewController *controller
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            controller,
+            kYTLGActionSheetGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGActionSheetEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.ActionSheet";
+
+        objc_setAssociatedObject(
+            controller,
+            kYTLGActionSheetGlassKey,
             glass,
             OBJC_ASSOCIATION_RETAIN_NONATOMIC
         );
@@ -2192,266 +2347,121 @@ YTLGPlayerGroupGlass(
     return glass;
 }
 
-static void YTLGApplyPlayerGroupGlass(
-    YTMainAppControlsOverlayView *overlay,
-    UIView *topContainer,
-    NSArray<UIControl *> *controls,
-    const void *key,
-    NSString *identifier
+static void YTLGRemoveActionSheetGlass(
+    YTActionSheetDialogViewController *controller
 ) {
     UIVisualEffectView *glass =
         objc_getAssociatedObject(
-            overlay,
-            key
+            controller,
+            kYTLGActionSheetGlassKey
         );
 
-    if (controls.count == 0) {
-        glass.hidden = YES;
-        return;
-    }
-
-    CGRect unionRect = CGRectNull;
-
-    for (UIControl *control in controls) {
-        CGRect frame =
-            [control convertRect:control.bounds
-                          toView:overlay];
-
-        if (CGRectIsEmpty(frame) ||
-            frame.size.width > 80.0 ||
-            frame.size.height > 80.0) {
-            continue;
-        }
-
-        unionRect =
-            CGRectIsNull(unionRect)
-                ? frame
-                : CGRectUnion(
-                    unionRect,
-                    frame
-                );
-    }
-
-    if (CGRectIsNull(unionRect) ||
-        CGRectIsEmpty(unionRect)) {
-        if (glass) glass.hidden = YES;
-        return;
-    }
-
-    unionRect =
-        CGRectInset(
-            unionRect,
-            -8.0,
-            -5.0
-        );
-
-    CGRect safe =
-        UIEdgeInsetsInsetRect(
-            overlay.bounds,
-            overlay.safeAreaInsets
-        );
-
-    if (CGRectIsEmpty(safe)) {
-        safe = overlay.bounds;
-    }
-
-    unionRect =
-        CGRectIntersection(
-            unionRect,
-            safe
-        );
-
-    if (CGRectIsNull(unionRect) ||
-        CGRectIsEmpty(unionRect) ||
-        unionRect.size.height > 62.0 ||
-        unionRect.size.width >
-            overlay.bounds.size.width * 0.48) {
-
-        if (glass) glass.hidden = YES;
-        return;
-    }
-
-    // A single top icon should read as a circle, not a narrow lozenge.
-    if (controls.count == 1) {
-        CGFloat side =
-            MAX(
-                44.0,
-                unionRect.size.height
-            );
-
-        CGPoint center =
-            CGPointMake(
-                CGRectGetMidX(unionRect),
-                CGRectGetMidY(unionRect)
-            );
-
-        unionRect =
-            CGRectMake(
-                center.x - side * 0.5,
-                center.y - side * 0.5,
-                side,
-                side
-            );
-    }
-
-    glass =
-        YTLGPlayerGroupGlass(
-            overlay,
-            key,
-            identifier
-        );
-
-    glass.hidden = NO;
-    glass.frame = unionRect;
-    glass.layer.cornerRadius =
-        unionRect.size.height * 0.5;
-
-    UIView *branch =
-        YTLGDirectBranchUnderAncestor(
-            topContainer,
-            overlay
-        );
-
-    if (branch) {
-        if (glass.superview != overlay) {
-            [glass removeFromSuperview];
-        }
-
-        [overlay insertSubview:glass
-                 belowSubview:branch];
-    } else {
-        if (glass.superview != overlay) {
-            [glass removeFromSuperview];
-            [overlay insertSubview:glass
-                           atIndex:0];
-        }
-    }
+    [glass removeFromSuperview];
 }
 
-static void YTLGUpdatePlayerTopGlass(
-    YTMainAppControlsOverlayView *overlay
+static void YTLGUpdateActionSheetGlass(
+    YTActionSheetDialogViewController *controller
 ) {
-    if (!overlay ||
-        !overlay.window ||
-        CGRectIsEmpty(overlay.bounds)) {
+    if (!controller ||
+        !controller.view.window ||
+        YTLGControllerTreeLooksMediaRelated(
+            controller)) {
+
+        YTLGRemoveActionSheetGlass(
+            controller
+        );
         return;
     }
 
-    UIView *topContainer =
-        YTLGTopPlayerControlsContainer(
-            overlay
+    UIView *sheet =
+        [controller actionSheetView];
+
+    if (!sheet ||
+        !sheet.superview ||
+        sheet.hidden ||
+        sheet.alpha <= 0.01 ||
+        CGRectIsEmpty(sheet.bounds)) {
+        return;
+    }
+
+    UIView *host = sheet.superview;
+
+    UIVisualEffectView *glass =
+        YTLGActionSheetGlassView(
+            controller
         );
 
-    if (!topContainer ||
-        topContainer.hidden ||
-        topContainer.alpha <= 0.01) {
-
-        UIVisualEffectView *left =
-            objc_getAssociatedObject(
-                overlay,
-                kYTLGPlayerLeftGlassKey
-            );
-
-        UIVisualEffectView *right =
-            objc_getAssociatedObject(
-                overlay,
-                kYTLGPlayerRightGlassKey
-            );
-
-        left.hidden = YES;
-        right.hidden = YES;
-        return;
+    if (glass.superview != host) {
+        [glass removeFromSuperview];
+        [host insertSubview:glass
+               belowSubview:sheet];
     }
 
-    NSMutableArray<UIControl *> *controls =
-        [NSMutableArray array];
+    CGRect frame =
+        [sheet convertRect:sheet.bounds
+                    toView:host];
 
-    YTLGCollectPlayerControls(
-        topContainer,
-        controls
-    );
+    glass.frame = frame;
 
-    CGFloat midX =
-        overlay.bounds.size.width * 0.5;
+    CGFloat radius =
+        sheet.layer.cornerRadius;
 
-    NSMutableArray<UIControl *> *left =
-        [NSMutableArray array];
-
-    NSMutableArray<UIControl *> *right =
-        [NSMutableArray array];
-
-    for (UIControl *control in controls) {
-        CGRect frame =
-            [control convertRect:control.bounds
-                          toView:overlay];
-
-        // Ignore anything straddling the center; those are likely central
-        // playback controls rather than top-corner actions.
-        if (CGRectGetMaxX(frame) < midX) {
-            [left addObject:control];
-        } else if (CGRectGetMinX(frame) > midX) {
-            [right addObject:control];
-        }
+    if (radius <= 0.0) {
+        // YouTube's sheet corners are normally in the low/mid twenties.
+        radius = 22.0;
     }
 
-    YTLGApplyPlayerGroupGlass(
-        overlay,
-        topContainer,
-        left,
-        kYTLGPlayerLeftGlassKey,
-        @"YTLiquidGlass.PlayerTopLeft"
-    );
+    glass.layer.cornerRadius = radius;
 
-    YTLGApplyPlayerGroupGlass(
-        overlay,
-        topContainer,
-        right,
-        kYTLGPlayerRightGlassKey,
-        @"YTLiquidGlass.PlayerTopRight"
-    );
+    // Remove the old opaque/flat sheet surface so the system material is what
+    // actually forms the background. Rows and actions stay untouched above it.
+    sheet.opaque = NO;
+    sheet.backgroundColor =
+        UIColor.clearColor;
+    sheet.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    [host insertSubview:glass
+           belowSubview:sheet];
 }
 
-static void YTLGRefreshPlayerTopGlassSoon(
-    YTMainAppControlsOverlayView *overlay
+static void YTLGRefreshActionSheetSoon(
+    YTActionSheetDialogViewController *controller
 ) {
-    if (!overlay) return;
+    if (!controller) return;
 
     dispatch_async(
         dispatch_get_main_queue(),
         ^{
-            if (overlay.window) {
-                YTLGUpdatePlayerTopGlass(
-                    overlay
+            if (controller.view.window) {
+                YTLGUpdateActionSheetGlass(
+                    controller
                 );
             }
         }
     );
 }
 
-%group YTLiquidGlassPlayerTopControls
+%group YTLiquidGlassNormalActionSheets
 
-%hook YTMainAppControlsOverlayView
+%hook YTActionSheetDialogViewController
 
-- (void)layoutSubviews {
+- (void)viewDidLayoutSubviews {
     %orig;
 
-    YTLGUpdatePlayerTopGlass(self);
+    YTLGUpdateActionSheetGlass(self);
 }
 
-- (void)didMoveToWindow {
-    %orig;
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
 
-    if (self.window) {
-        YTLGRefreshPlayerTopGlassSoon(self);
-    }
+    YTLGRefreshActionSheetSoon(self);
 }
 
-- (void)setTopOverlayVisible:(BOOL)visible
-    isAutonavCanceledState:(BOOL)canceledState {
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig(animated);
 
-    %orig(visible, canceledState);
-
-    YTLGRefreshPlayerTopGlassSoon(self);
+    YTLGRemoveActionSheetGlass(self);
 }
 
 %end
@@ -2492,9 +2502,15 @@ static void YTLGRefreshPlayerTopGlassSoon(
         }
 
         if (NSClassFromString(@"UIGlassEffect") &&
-            NSClassFromString(@"YTMainAppControlsOverlayView")) {
+            NSClassFromString(@"YTHeaderView")) {
 
-            %init(YTLiquidGlassPlayerTopControls);
+            %init(YTLiquidGlassHeaderLeft);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTActionSheetDialogViewController")) {
+
+            %init(YTLiquidGlassNormalActionSheets);
         }
     }
 }
