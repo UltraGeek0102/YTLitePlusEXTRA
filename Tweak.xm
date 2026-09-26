@@ -2,18 +2,27 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.3
+// YTLiquidGlass v0.4 — Native UIKit bridge
 //
-// Robust floating Liquid Glass presentation for YouTube/YTLite's pivot bar.
+// Apollo Reborn gets its floating Liquid Glass tab bar from UIKit itself:
+// a modern-sdk-linked UITabBarController/UITabBar produces the floating
+// capsule, native Liquid Lens, spacing and selection morphing.
 //
-// IMPORTANT:
-// This tweak never replaces YouTube/YTLite's tab model, controller,
-// identifiers, actions, order, or custom-tab logic. It only styles the
-// existing runtime tab views.
+// YouTube does not use UITabBarController for its bottom navigation. It uses
+// YTPivotBarView/YTPivotBarItemView. This tweak therefore creates a *visual*
+// child UITabBarController that mirrors the current YouTube/YTLite tabs.
 //
-// v0.3 deliberately keeps UIGlassEffect views directly inside YTPivotBarView.
-// This avoids the extra UIGlassContainerEffect compositor layer that could
-// prevent the glass hierarchy from appearing on some YouTube/iOS builds.
+// YTLite/YouTube remain the source of truth for:
+//   • which tabs exist
+//   • tab order
+//   • custom tabs
+//   • pivot identifiers
+//   • actual navigation
+//
+// A tap on the native UIKit bar is forwarded back to
+// -[YTPivotBarViewController selectItemWithPivotIdentifier:].
+//
+// No Home/Shorts/etc. identifiers are hard-coded.
 
 @interface YTIPivotBarItemRenderer : NSObject
 @property(nonatomic, copy, readonly) NSString *pivotIdentifier;
@@ -26,127 +35,95 @@
 @end
 
 @interface YTPivotBarView : UIView
+- (void)setRenderer:(id)renderer;
 - (void)selectItemWithPivotIdentifier:(id)identifier;
 @end
 
 @interface YTPivotBarItemView : UIView
 @property(nonatomic, strong, readonly) YTIPivotBarItemRenderer *renderer;
+@property(nonatomic, strong, readonly) UIButton *navigationButton;
 @property(nonatomic, weak, readonly) YTPivotBarViewController *delegate;
+- (void)setRenderer:(id)renderer;
 @end
 
-static const void *kYTLGBackgroundKey = &kYTLGBackgroundKey;
-static const void *kYTLGLensKey = &kYTLGLensKey;
+static const void *kYTLGBridgeKey = &kYTLGBridgeKey;
 
-#pragma mark - Glass
+@class YTLGNativeTabBarController;
 
-static UIVisualEffect *YTLGGlassEffect(BOOL selectedLens) {
-    if (@available(iOS 26.0, *)) {
-        Class glassClass = NSClassFromString(@"UIGlassEffect");
+static YTPivotBarView *YTLGAncestorPivotBar(UIView *view);
+static NSArray<YTPivotBarItemView *> *YTLGCurrentPivotItems(YTPivotBarView *bar);
+static void YTLGInstallOrRefreshBridge(YTPivotBarViewController *owner);
+static void YTLGRefreshBridgeForBar(YTPivotBarView *bar);
+static void YTLGSyncBridgeSelection(YTPivotBarViewController *owner);
 
-        if (glassClass &&
-            [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+#pragma mark - Native bridge controller
 
-            // Use regular glass for both elements so the material remains
-            // clearly visible on YouTube's dark and video-backed surfaces.
-            UIGlassEffect *effect =
-                [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+@interface YTLGNativeTabBarController : UITabBarController <UITabBarControllerDelegate>
+@property(nonatomic, weak) YTPivotBarViewController *youtubeController;
+@property(nonatomic, weak) YTPivotBarView *youtubeBar;
+@property(nonatomic, copy) NSArray<NSString *> *pivotIdentifiers;
+@property(nonatomic, copy) NSString *contentSignature;
+@property(nonatomic, assign) BOOL syncingSelection;
+@end
 
-            effect.interactive = NO;
+@implementation YTLGNativeTabBarController
 
-            if (selectedLens) {
-                // Stronger selected lens, similar to native floating controls.
-                effect.tintColor =
-                    [UIColor.blackColor colorWithAlphaComponent:0.18];
-            }
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        self.delegate = self;
+        self.syncingSelection = NO;
+    }
+    return self;
+}
 
-            return effect;
-        }
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    // The actual material/geometry is owned by UIKit. Do not install a custom
+    // UITabBarAppearance here because that can force the legacy-looking bar.
+    self.view.backgroundColor = UIColor.clearColor;
+    self.view.opaque = NO;
+    self.view.clipsToBounds = NO;
+
+    self.tabBar.opaque = NO;
+    self.tabBar.clipsToBounds = NO;
+}
+
+- (BOOL)tabBarController:(UITabBarController *)tabBarController
+ shouldSelectViewController:(UIViewController *)viewController {
+
+    if (self.syncingSelection) {
+        return YES;
     }
 
-    return [UIBlurEffect
-        effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
-}
+    NSUInteger index =
+        [self.viewControllers indexOfObjectIdenticalTo:viewController];
 
-static void YTLGPrepareGlassView(UIVisualEffectView *view) {
-    view.userInteractionEnabled = NO;
-    view.opaque = NO;
-    view.backgroundColor = UIColor.clearColor;
-    view.clipsToBounds = YES;
-    view.layer.cornerCurve = kCACornerCurveContinuous;
-}
-
-static UIVisualEffectView *YTLGBackgroundGlass(YTPivotBarView *bar) {
-    UIVisualEffectView *glass =
-        objc_getAssociatedObject(bar, kYTLGBackgroundKey);
-
-    if (!glass) {
-        glass = [[UIVisualEffectView alloc]
-            initWithEffect:YTLGGlassEffect(NO)];
-
-        YTLGPrepareGlassView(glass);
-
-        glass.accessibilityIdentifier =
-            @"YTLiquidGlass.FloatingTabBar";
-
-        [bar addSubview:glass];
-
-        objc_setAssociatedObject(
-            bar,
-            kYTLGBackgroundKey,
-            glass,
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        );
+    if (index == NSNotFound ||
+        index >= self.pivotIdentifiers.count) {
+        return YES;
     }
 
-    return glass;
-}
+    NSString *identifier = self.pivotIdentifiers[index];
 
-static UIVisualEffectView *YTLGSelectionLens(YTPivotBarView *bar) {
-    UIVisualEffectView *lens =
-        objc_getAssociatedObject(bar, kYTLGLensKey);
+    if (identifier.length > 0 &&
+        self.youtubeController) {
 
-    if (!lens) {
-        lens = [[UIVisualEffectView alloc]
-            initWithEffect:YTLGGlassEffect(YES)];
-
-        YTLGPrepareGlassView(lens);
-
-        lens.hidden = YES;
-        lens.accessibilityIdentifier =
-            @"YTLiquidGlass.SelectedLens";
-
-        [bar addSubview:lens];
-
-        objc_setAssociatedObject(
-            bar,
-            kYTLGLensKey,
-            lens,
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        );
+        // Forward the user's tap into YouTube/YTLite. This preserves their
+        // navigation model instead of replacing it with our dummy controllers.
+        [self.youtubeController
+            selectItemWithPivotIdentifier:identifier];
     }
 
-    return lens;
+    return YES;
 }
 
-#pragma mark - Runtime tab discovery
+@end
 
-static BOOL YTLGItemIsSelected(YTPivotBarItemView *item) {
-    if (!item) return NO;
+#pragma mark - Pivot item discovery
 
-    NSString *itemIdentifier = item.renderer.pivotIdentifier;
-    NSString *selectedIdentifier =
-        item.delegate.selectedPivotIdentifier;
-
-    if (itemIdentifier.length == 0 ||
-        selectedIdentifier.length == 0) {
-        return NO;
-    }
-
-    return [itemIdentifier
-        isEqualToString:selectedIdentifier];
-}
-
-static void YTLGCollectItems(
+static void YTLGCollectPivotItems(
     UIView *view,
     NSMutableArray<YTPivotBarItemView *> *items
 ) {
@@ -162,400 +139,617 @@ static void YTLGCollectItems(
     }
 
     for (UIView *subview in view.subviews) {
-        NSString *identifier =
-            subview.accessibilityIdentifier;
-
-        if ([identifier hasPrefix:@"YTLiquidGlass."]) {
+        // The native bridge has its own UIKit hierarchy. Never recurse into it.
+        if ([subview.accessibilityIdentifier
+                isEqualToString:@"YTLiquidGlass.NativeBridge"]) {
             continue;
         }
 
-        YTLGCollectItems(subview, items);
+        YTLGCollectPivotItems(subview, items);
     }
 }
 
 static NSArray<YTPivotBarItemView *> *
-YTLGCurrentItems(YTPivotBarView *bar) {
+YTLGCurrentPivotItems(YTPivotBarView *bar) {
     NSMutableArray<YTPivotBarItemView *> *items =
         [NSMutableArray array];
 
-    YTLGCollectItems(bar, items);
+    YTLGCollectPivotItems(bar, items);
 
     [items sortUsingComparator:
         ^NSComparisonResult(
             YTPivotBarItemView *a,
             YTPivotBarItemView *b
         ) {
-            CGRect aFrame =
+            CGRect af =
                 [a convertRect:a.bounds toView:bar];
 
-            CGRect bFrame =
+            CGRect bf =
                 [b convertRect:b.bounds toView:bar];
 
-            CGFloat aX = CGRectGetMidX(aFrame);
-            CGFloat bX = CGRectGetMidX(bFrame);
+            CGFloat ax = CGRectGetMidX(af);
+            CGFloat bx = CGRectGetMidX(bf);
 
-            if (aX < bX) return NSOrderedAscending;
-            if (aX > bX) return NSOrderedDescending;
+            if (ax < bx) return NSOrderedAscending;
+            if (ax > bx) return NSOrderedDescending;
             return NSOrderedSame;
         }];
 
     return items;
 }
 
-#pragma mark - Geometry
+static YTPivotBarView *
+YTLGAncestorPivotBar(UIView *view) {
+    Class barClass =
+        NSClassFromString(@"YTPivotBarView");
 
-static CGRect YTLGCapsuleFrame(
-    YTPivotBarView *bar,
+    UIView *candidate = view;
+
+    while (candidate) {
+        if (barClass &&
+            [candidate isKindOfClass:barClass]) {
+            return (YTPivotBarView *)candidate;
+        }
+
+        candidate = candidate.superview;
+    }
+
+    return nil;
+}
+
+#pragma mark - Mirroring helpers
+
+static UIImage *YTLGNativeImage(UIImage *image) {
+    if (![image isKindOfClass:UIImage.class]) {
+        return nil;
+    }
+
+    // Profile/avatar-style images are commonly AlwaysOriginal. Preserve that.
+    // Normal YouTube glyphs are made template images so UIKit can apply its
+    // adaptive Liquid Glass selected/unselected coloring.
+    if (image.renderingMode ==
+        UIImageRenderingModeAlwaysOriginal) {
+        return image;
+    }
+
+    return [image
+        imageWithRenderingMode:
+            UIImageRenderingModeAlwaysTemplate];
+}
+
+static NSString *
+YTLGTitleForPivotItem(YTPivotBarItemView *item) {
+    UIButton *button = item.navigationButton;
+
+    if (![button isKindOfClass:UIButton.class]) {
+        return nil;
+    }
+
+    NSString *normalTitle =
+        [button titleForState:UIControlStateNormal];
+
+    // If YTLite deliberately set an empty title (Hide Tab Labels), respect it:
+    // nil title tells UIKit to use its native compact icon-only presentation.
+    if (normalTitle != nil) {
+        return normalTitle.length > 0
+            ? normalTitle
+            : nil;
+    }
+
+    NSString *currentTitle = button.currentTitle;
+
+    if (currentTitle.length > 0) {
+        return currentTitle;
+    }
+
+    // Only use accessibility text as a fallback when the button never supplied
+    // a visible title in the first place.
+    NSString *accessibilityTitle =
+        button.accessibilityLabel;
+
+    return accessibilityTitle.length > 0
+        ? accessibilityTitle
+        : nil;
+}
+
+static NSString *
+YTLGAccessibilityTitleForPivotItem(
+    YTPivotBarItemView *item,
+    NSString *visibleTitle
+) {
+    NSString *label =
+        item.navigationButton.accessibilityLabel;
+
+    if (label.length > 0) {
+        return label;
+    }
+
+    if (visibleTitle.length > 0) {
+        return visibleTitle;
+    }
+
+    return item.renderer.pivotIdentifier;
+}
+
+static UIImage *
+YTLGNormalImageForPivotItem(
+    YTPivotBarItemView *item
+) {
+    UIButton *button = item.navigationButton;
+
+    UIImage *image =
+        [button imageForState:UIControlStateNormal];
+
+    if (!image) {
+        image = button.currentImage;
+    }
+
+    if (!image) {
+        image = button.imageView.image;
+    }
+
+    return YTLGNativeImage(image);
+}
+
+static UIImage *
+YTLGSelectedImageForPivotItem(
+    YTPivotBarItemView *item,
+    UIImage *fallback
+) {
+    UIButton *button = item.navigationButton;
+
+    UIImage *image =
+        [button imageForState:UIControlStateSelected];
+
+    if (!image) {
+        image =
+            [button imageForState:UIControlStateHighlighted];
+    }
+
+    if (!image) {
+        image = fallback;
+    }
+
+    return YTLGNativeImage(image);
+}
+
+static NSString *
+YTLGSignatureForPivotItems(
     NSArray<YTPivotBarItemView *> *items
 ) {
-    CGRect bounds = bar.bounds;
+    NSMutableArray<NSString *> *parts =
+        [NSMutableArray arrayWithCapacity:items.count];
 
-    // Approximate native floating-tab proportions:
-    // ~20pt side inset on a 440pt-wide Pro Max screen,
-    // ~60pt glass height.
-    CGFloat sideInset =
-        MAX(16.0, MIN(22.0, bounds.size.width * 0.045));
+    for (YTPivotBarItemView *item in items) {
+        NSString *identifier =
+            item.renderer.pivotIdentifier ?: @"";
 
-    CGFloat safeBottom = bar.safeAreaInsets.bottom;
+        NSString *title =
+            YTLGTitleForPivotItem(item) ?: @"";
 
-    CGFloat usableHeight =
-        bounds.size.height - safeBottom;
+        UIImage *normal =
+            YTLGNormalImageForPivotItem(item);
 
-    if (usableHeight < 44.0) {
-        usableHeight = bounds.size.height;
+        UIImage *selected =
+            YTLGSelectedImageForPivotItem(
+                item,
+                normal
+            );
+
+        [parts addObject:
+            [NSString stringWithFormat:
+                @"%@|%@|%lu|%lu",
+                identifier,
+                title,
+                (unsigned long)normal.hash,
+                (unsigned long)selected.hash]];
     }
 
-    CGFloat height =
-        MIN(62.0, MAX(54.0, usableHeight - 6.0));
-
-    CGFloat centerY = usableHeight * 0.5;
-
-    // If YouTube's actual items provide a more reliable vertical center,
-    // follow them instead of assuming a fixed bar layout.
-    if (items.count > 0) {
-        CGFloat totalMidY = 0.0;
-        NSUInteger validCount = 0;
-
-        for (YTPivotBarItemView *item in items) {
-            CGRect frame =
-                [item convertRect:item.bounds toView:bar];
-
-            if (!CGRectIsEmpty(frame)) {
-                totalMidY += CGRectGetMidY(frame);
-                validCount += 1;
-            }
-        }
-
-        if (validCount > 0) {
-            centerY = totalMidY / (CGFloat)validCount;
-        }
-    }
-
-    CGFloat y = centerY - height * 0.5;
-
-    y = MAX(2.0, y);
-
-    if (y + height > bounds.size.height - 2.0) {
-        y = MAX(2.0, bounds.size.height - height - 2.0);
-    }
-
-    return CGRectMake(
-        sideInset,
-        y,
-        MAX(1.0, bounds.size.width - sideInset * 2.0),
-        height
-    );
+    return [parts componentsJoinedByString:@"||"];
 }
 
-static CGRect YTLGLensFrame(
+#pragma mark - Original YouTube chrome suppression
+
+static void YTLGHideOriginalPivotChrome(
     YTPivotBarView *bar,
-    YTPivotBarItemView *item,
-    CGRect capsuleFrame
+    UIView *bridgeView
 ) {
-    CGRect itemFrame =
-        [item convertRect:item.bounds toView:bar];
+    if (!bar) return;
 
-    CGFloat width =
-        MAX(58.0, itemFrame.size.width - 8.0);
-
-    // Do not allow an unusually wide custom tab title to consume
-    // most of the floating capsule.
-    width =
-        MIN(width, capsuleFrame.size.width * 0.28);
-
-    CGFloat height =
-        MAX(46.0, capsuleFrame.size.height - 6.0);
-
-    height =
-        MIN(height, capsuleFrame.size.height - 2.0);
-
-    CGFloat x =
-        CGRectGetMidX(itemFrame) - width * 0.5;
-
-    CGFloat y =
-        CGRectGetMidY(capsuleFrame) - height * 0.5;
-
-    CGFloat minX =
-        CGRectGetMinX(capsuleFrame) + 3.0;
-
-    CGFloat maxX =
-        CGRectGetMaxX(capsuleFrame) - 3.0 - width;
-
-    if (maxX < minX) {
-        maxX = minX;
-    }
-
-    x = MIN(MAX(x, minX), maxX);
-
-    return CGRectMake(x, y, width, height);
-}
-
-static BOOL YTLGFramesNearlyEqual(CGRect a, CGRect b) {
-    const CGFloat epsilon = 0.5;
-
-    return fabs(a.origin.x - b.origin.x) < epsilon &&
-           fabs(a.origin.y - b.origin.y) < epsilon &&
-           fabs(a.size.width - b.size.width) < epsilon &&
-           fabs(a.size.height - b.size.height) < epsilon;
-}
-
-#pragma mark - Layer ordering / old chrome
-
-static void YTLGClearBarChrome(YTPivotBarView *bar) {
     bar.opaque = NO;
     bar.backgroundColor = UIColor.clearColor;
-    bar.layer.backgroundColor = UIColor.clearColor.CGColor;
+    bar.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
 
-    // Allow the capsule's natural rounded edge to remain visible.
+    // The native UIKit bridge visually replaces YouTube's custom pivot
+    // hierarchy, but the original hierarchy remains alive underneath so YTLite
+    // can still rebuild/reorder it and remain the source of truth.
+    for (UIView *subview in bar.subviews) {
+        if (subview == bridgeView) {
+            subview.hidden = NO;
+            subview.alpha = 1.0;
+            continue;
+        }
+
+        subview.hidden = YES;
+    }
+
     bar.clipsToBounds = NO;
     bar.layer.masksToBounds = NO;
 }
 
-static void YTLGPlaceGlassBehindItems(
-    YTPivotBarView *bar,
-    UIVisualEffectView *background,
-    UIVisualEffectView *lens,
-    NSArray<YTPivotBarItemView *> *items
-) {
-    // Bring the glass above YouTube's original background chrome so it cannot
-    // disappear underneath a private full-width background subview.
-    [bar bringSubviewToFront:background];
-    [bar bringSubviewToFront:lens];
+#pragma mark - Build / refresh the native UIKit tab bar
 
-    // Then put every real tab item back above the glass. Touch handling and
-    // all YTLite navigation behavior stay on the original item views.
-    for (YTPivotBarItemView *item in items) {
-        [bar bringSubviewToFront:item];
-    }
-}
-
-#pragma mark - Update
-
-static void YTLGUpdateGlass(
-    YTPivotBarView *bar,
-    BOOL animated
-) {
-    if (!bar ||
-        CGRectIsEmpty(bar.bounds) ||
-        !bar.window) {
-        return;
-    }
-
-    YTLGClearBarChrome(bar);
-
-    NSArray<YTPivotBarItemView *> *items =
-        YTLGCurrentItems(bar);
-
-    UIVisualEffectView *background =
-        YTLGBackgroundGlass(bar);
-
-    UIVisualEffectView *lens =
-        YTLGSelectionLens(bar);
-
-    CGRect capsuleFrame =
-        YTLGCapsuleFrame(bar, items);
-
-    background.frame = capsuleFrame;
-    background.layer.cornerRadius =
-        capsuleFrame.size.height * 0.5;
-
-    YTPivotBarItemView *selectedItem = nil;
-
-    for (YTPivotBarItemView *item in items) {
-        item.opaque = NO;
-        item.backgroundColor = UIColor.clearColor;
-
-        if (YTLGItemIsSelected(item)) {
-            selectedItem = item;
-        }
-    }
-
-    YTLGPlaceGlassBehindItems(
+static YTLGNativeTabBarController *
+YTLGBridgeForBar(YTPivotBarView *bar) {
+    return objc_getAssociatedObject(
         bar,
-        background,
-        lens,
-        items
+        kYTLGBridgeKey
     );
-
-    if (!selectedItem) {
-        lens.hidden = YES;
-        return;
-    }
-
-    CGRect target =
-        YTLGLensFrame(
-            bar,
-            selectedItem,
-            capsuleFrame
-        );
-
-    lens.layer.cornerRadius =
-        target.size.height * 0.5;
-
-    if (lens.hidden ||
-        CGRectIsEmpty(lens.frame) ||
-        !animated) {
-
-        lens.hidden = NO;
-        lens.frame = target;
-
-        YTLGPlaceGlassBehindItems(
-            bar,
-            background,
-            lens,
-            items
-        );
-
-        return;
-    }
-
-    lens.hidden = NO;
-
-    if (YTLGFramesNearlyEqual(
-            lens.frame,
-            target)) {
-        return;
-    }
-
-    [UIView animateWithDuration:0.36
-                          delay:0.0
-         usingSpringWithDamping:0.86
-          initialSpringVelocity:0.20
-                        options:
-                            UIViewAnimationOptionBeginFromCurrentState |
-                            UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-                         lens.frame = target;
-                         lens.layer.cornerRadius =
-                             target.size.height * 0.5;
-                     }
-                     completion:^(BOOL finished) {
-                         YTLGPlaceGlassBehindItems(
-                             bar,
-                             background,
-                             lens,
-                             YTLGCurrentItems(bar)
-                         );
-                     }];
 }
 
-static void YTLGRefreshSoon(
+static void YTLGAttachBridgeIfNeeded(
+    YTPivotBarViewController *owner,
     YTPivotBarView *bar,
-    BOOL animated
+    YTLGNativeTabBarController *bridge
 ) {
+    if (!owner || !bar || !bridge) return;
+
+    if (bridge.parentViewController != owner) {
+        [owner addChildViewController:bridge];
+    }
+
+    UIView *bridgeView = bridge.view;
+
+    bridgeView.accessibilityIdentifier =
+        @"YTLiquidGlass.NativeBridge";
+
+    bridgeView.backgroundColor =
+        UIColor.clearColor;
+
+    bridgeView.opaque = NO;
+    bridgeView.clipsToBounds = NO;
+
+    bridgeView.frame = bar.bounds;
+
+    bridgeView.autoresizingMask =
+        UIViewAutoresizingFlexibleWidth |
+        UIViewAutoresizingFlexibleHeight;
+
+    if (bridgeView.superview != bar) {
+        [bridgeView removeFromSuperview];
+        [bar addSubview:bridgeView];
+    }
+
+    if (bridge.parentViewController == owner) {
+        [bridge didMoveToParentViewController:owner];
+    }
+
+    [bar bringSubviewToFront:bridgeView];
+
+    [bridgeView setNeedsLayout];
+    [bridgeView layoutIfNeeded];
+}
+
+static void YTLGRebuildNativeItemsIfNeeded(
+    YTLGNativeTabBarController *bridge
+) {
+    YTPivotBarView *bar = bridge.youtubeBar;
+
     if (!bar) return;
 
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
-            [bar setNeedsLayout];
-            [bar layoutIfNeeded];
-            YTLGUpdateGlass(bar, animated);
+    NSArray<YTPivotBarItemView *> *items =
+        YTLGCurrentPivotItems(bar);
+
+    if (items.count == 0) {
+        bridge.view.hidden = YES;
+        return;
+    }
+
+    NSString *signature =
+        YTLGSignatureForPivotItems(items);
+
+    BOOL needsRebuild =
+        ![bridge.contentSignature
+            isEqualToString:signature];
+
+    if (needsRebuild) {
+        NSMutableArray<UIViewController *> *controllers =
+            [NSMutableArray arrayWithCapacity:items.count];
+
+        NSMutableArray<NSString *> *identifiers =
+            [NSMutableArray arrayWithCapacity:items.count];
+
+        for (YTPivotBarItemView *item in items) {
+            NSString *identifier =
+                item.renderer.pivotIdentifier ?: @"";
+
+            NSString *title =
+                YTLGTitleForPivotItem(item);
+
+            NSString *accessibilityTitle =
+                YTLGAccessibilityTitleForPivotItem(
+                    item,
+                    title
+                );
+
+            UIImage *normalImage =
+                YTLGNormalImageForPivotItem(item);
+
+            UIImage *selectedImage =
+                YTLGSelectedImageForPivotItem(
+                    item,
+                    normalImage
+                );
+
+            UIViewController *dummy =
+                [[UIViewController alloc] init];
+
+            dummy.view.backgroundColor =
+                UIColor.clearColor;
+
+            dummy.view.opaque = NO;
+
+            UITabBarItem *tabItem =
+                [[UITabBarItem alloc]
+                    initWithTitle:title
+                           image:normalImage
+                   selectedImage:selectedImage];
+
+            tabItem.accessibilityLabel =
+                accessibilityTitle;
+
+            dummy.tabBarItem = tabItem;
+
+            [controllers addObject:dummy];
+            [identifiers addObject:identifier];
         }
-    );
+
+        bridge.syncingSelection = YES;
+        bridge.viewControllers = controllers;
+        bridge.pivotIdentifiers = identifiers;
+        bridge.contentSignature = signature;
+        bridge.syncingSelection = NO;
+    }
+
+    bridge.view.hidden = NO;
+
+    // Mirror YouTube's selected pivot into UIKit's native selected tab.
+    NSString *selectedIdentifier =
+        bridge.youtubeController.selectedPivotIdentifier;
+
+    NSUInteger selectedIndex =
+        [bridge.pivotIdentifiers
+            indexOfObject:selectedIdentifier ?: @""];
+
+    if (selectedIndex != NSNotFound &&
+        selectedIndex < bridge.viewControllers.count &&
+        bridge.selectedIndex != selectedIndex) {
+
+        bridge.syncingSelection = YES;
+        bridge.selectedIndex = selectedIndex;
+        bridge.syncingSelection = NO;
+    }
+
+    [bridge.view setNeedsLayout];
+    [bridge.view layoutIfNeeded];
 }
 
-static void YTLGRefreshController(
-    YTPivotBarViewController *controller,
-    BOOL animated
+static void
+YTLGInstallOrRefreshBridge(
+    YTPivotBarViewController *owner
 ) {
-    UIView *barView =
-        [controller pivotBarView];
+    if (!owner) return;
+
+    UIView *rawBar =
+        [owner pivotBarView];
 
     Class barClass =
         NSClassFromString(@"YTPivotBarView");
 
-    if (!barView ||
+    if (!rawBar ||
         !barClass ||
-        ![barView isKindOfClass:barClass]) {
+        ![rawBar isKindOfClass:barClass]) {
         return;
     }
 
-    YTLGRefreshSoon(
-        (YTPivotBarView *)barView,
-        animated
+    YTPivotBarView *bar =
+        (YTPivotBarView *)rawBar;
+
+    YTLGNativeTabBarController *bridge =
+        YTLGBridgeForBar(bar);
+
+    if (!bridge) {
+        bridge =
+            [[YTLGNativeTabBarController alloc] init];
+
+        bridge.youtubeController = owner;
+        bridge.youtubeBar = bar;
+
+        objc_setAssociatedObject(
+            bar,
+            kYTLGBridgeKey,
+            bridge,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    } else {
+        bridge.youtubeController = owner;
+        bridge.youtubeBar = bar;
+    }
+
+    YTLGAttachBridgeIfNeeded(
+        owner,
+        bar,
+        bridge
     );
+
+    YTLGRebuildNativeItemsIfNeeded(bridge);
+
+    YTLGHideOriginalPivotChrome(
+        bar,
+        bridge.view
+    );
+
+    [bar bringSubviewToFront:bridge.view];
+}
+
+static void
+YTLGRefreshBridgeForBar(
+    YTPivotBarView *bar
+) {
+    if (!bar) return;
+
+    YTLGNativeTabBarController *bridge =
+        YTLGBridgeForBar(bar);
+
+    if (!bridge) {
+        // The owner hook will create it as soon as the controller is available.
+        return;
+    }
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (!bar.window) return;
+
+            bridge.view.frame = bar.bounds;
+
+            YTLGRebuildNativeItemsIfNeeded(
+                bridge
+            );
+
+            YTLGHideOriginalPivotChrome(
+                bar,
+                bridge.view
+            );
+
+            [bar bringSubviewToFront:
+                bridge.view];
+        }
+    );
+}
+
+static void
+YTLGSyncBridgeSelection(
+    YTPivotBarViewController *owner
+) {
+    if (!owner) return;
+
+    UIView *rawBar =
+        [owner pivotBarView];
+
+    if (!rawBar) return;
+
+    YTLGNativeTabBarController *bridge =
+        YTLGBridgeForBar(
+            (YTPivotBarView *)rawBar
+        );
+
+    if (!bridge) {
+        YTLGInstallOrRefreshBridge(owner);
+        return;
+    }
+
+    NSString *selected =
+        owner.selectedPivotIdentifier;
+
+    NSUInteger index =
+        [bridge.pivotIdentifiers
+            indexOfObject:selected ?: @""];
+
+    if (index != NSNotFound &&
+        index < bridge.viewControllers.count &&
+        bridge.selectedIndex != index) {
+
+        bridge.syncingSelection = YES;
+        bridge.selectedIndex = index;
+        bridge.syncingSelection = NO;
+    }
 }
 
 #pragma mark - Hooks
 
-%group YTLiquidGlass
-
-%hook YTPivotBarView
-
-- (void)layoutSubviews {
-    %orig;
-
-    YTLGUpdateGlass(self, NO);
-}
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (self.window) {
-        YTLGRefreshSoon(self, NO);
-    }
-}
-
-- (void)safeAreaInsetsDidChange {
-    %orig;
-
-    YTLGRefreshSoon(self, NO);
-}
-
-- (void)selectItemWithPivotIdentifier:(id)identifier {
-    %orig(identifier);
-
-    YTLGRefreshSoon(self, YES);
-}
-
-%end
-
-%hook YTPivotBarItemView
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (self.window) {
-        self.opaque = NO;
-        self.backgroundColor = UIColor.clearColor;
-    }
-}
-
-%end
+%group YTLiquidGlassNativeBridge
 
 %hook YTPivotBarViewController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
 
-    YTLGRefreshController(self, NO);
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            YTLGInstallOrRefreshBridge(self);
+        }
+    );
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+
+    YTLGInstallOrRefreshBridge(self);
 }
 
 - (void)selectItemWithPivotIdentifier:(id)identifier {
     %orig(identifier);
 
-    YTLGRefreshController(self, YES);
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            YTLGInstallOrRefreshBridge(self);
+            YTLGSyncBridgeSelection(self);
+        }
+    );
+}
+
+%end
+
+%hook YTPivotBarView
+
+- (void)setRenderer:(id)renderer {
+    %orig(renderer);
+
+    // YTLite edits the renderer array before/around this call when the user
+    // adds, removes or reorders tabs. Re-mirror the resulting runtime views.
+    YTLGRefreshBridgeForBar(self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGNativeTabBarController *bridge =
+        YTLGBridgeForBar(self);
+
+    if (bridge) {
+        bridge.view.frame = self.bounds;
+
+        YTLGRebuildNativeItemsIfNeeded(
+            bridge
+        );
+
+        YTLGHideOriginalPivotChrome(
+            self,
+            bridge.view
+        );
+
+        [self bringSubviewToFront:
+            bridge.view];
+    }
+}
+
+%end
+
+%hook YTPivotBarItemView
+
+- (void)setRenderer:(id)renderer {
+    %orig(renderer);
+
+    YTPivotBarView *bar =
+        YTLGAncestorPivotBar(self);
+
+    if (bar) {
+        YTLGRefreshBridgeForBar(bar);
+    }
 }
 
 %end
@@ -564,14 +758,11 @@ static void YTLGRefreshController(
 
 %ctor {
     if (@available(iOS 26.0, *)) {
-        // Do NOT require UIGlassContainerEffect here.
-        // Only the glass API actually used by this implementation is required.
-        if (NSClassFromString(@"UIGlassEffect") &&
-            NSClassFromString(@"YTPivotBarView") &&
+        if (NSClassFromString(@"YTPivotBarView") &&
             NSClassFromString(@"YTPivotBarItemView") &&
             NSClassFromString(@"YTPivotBarViewController")) {
 
-            %init(YTLiquidGlass);
+            %init(YTLiquidGlassNativeBridge);
         }
     }
 }
