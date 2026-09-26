@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.9 — Native tab bar + top navigation + full search glass
+// YTLiquidGlass v1.0 — Tab bar + header + full search + player glass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -59,6 +59,16 @@
 @property(nonatomic, assign) CGFloat tailingPadding;
 - (id)buttonForType:(NSUInteger)type;
 - (void)setButton:(id)button forType:(NSUInteger)type;
+@end
+
+
+// Search and player declarations are intentionally minimal. The implementation
+// discovers private child views at runtime so YouTube/YTVideoOverlay keep
+// ownership of their controls and behavior.
+@interface YTSearchViewController : UIViewController
+@end
+
+@interface YTMainAppControlsOverlayView : UIView
 @end
 
 static const void *kYTLGNativeBarKey = &kYTLGNativeBarKey;
@@ -1706,6 +1716,748 @@ YTLGRefreshActiveSearchSoon(id object) {
 
 %end
 
+
+#pragma mark - Search back button Liquid Glass
+
+static const void *kYTLGSearchBackGlassKey =
+    &kYTLGSearchBackGlassKey;
+
+static UIVisualEffect *YTLGSmallControlGlassEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:
+                @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static id YTLGObjectIvar(
+    id object,
+    const char *name
+) {
+    if (!object || !name) return nil;
+
+    Class cls = object_getClass(object);
+
+    while (cls) {
+        Ivar ivar =
+            class_getInstanceVariable(cls, name);
+
+        if (ivar) {
+            return object_getIvar(object, ivar);
+        }
+
+        cls = class_getSuperclass(cls);
+    }
+
+    return nil;
+}
+
+static UIView *YTLGFindDescendantOfClass(
+    UIView *view,
+    Class targetClass
+) {
+    if (!view || !targetClass) return nil;
+
+    if ([view isKindOfClass:targetClass]) {
+        return view;
+    }
+
+    for (UIView *subview in view.subviews) {
+        UIView *match =
+            YTLGFindDescendantOfClass(
+                subview,
+                targetClass
+            );
+
+        if (match) return match;
+    }
+
+    return nil;
+}
+
+static UIButton *
+YTLGSearchBackButton(
+    YTSearchViewController *controller
+) {
+    if (!controller) return nil;
+
+    id ivarButton =
+        YTLGObjectIvar(
+            controller,
+            "_backButton"
+        );
+
+    if ([ivarButton isKindOfClass:UIButton.class]) {
+        return (UIButton *)ivarButton;
+    }
+
+    // Fallback for YouTube versions where the ivar name changes: find the
+    // visible icon-sized UIButton immediately to the left of YTSearchBarView.
+    UIView *root = controller.view;
+    Class searchClass =
+        NSClassFromString(@"YTSearchBarView");
+
+    UIView *searchField =
+        YTLGFindDescendantOfClass(
+            root,
+            searchClass
+        );
+
+    if (!searchField) return nil;
+
+    CGRect searchFrame =
+        [root convertRect:searchField.bounds
+                 fromView:searchField];
+
+    NSMutableArray<UIView *> *stack =
+        [NSMutableArray arrayWithObject:root];
+
+    UIButton *best = nil;
+    CGFloat bestDistance = CGFLOAT_MAX;
+
+    while (stack.count > 0) {
+        UIView *candidate = stack.lastObject;
+        [stack removeLastObject];
+
+        for (UIView *subview in candidate.subviews) {
+            [stack addObject:subview];
+
+            if (![subview
+                    isKindOfClass:UIButton.class] ||
+                subview.hidden ||
+                subview.alpha <= 0.01) {
+                continue;
+            }
+
+            CGRect frame =
+                [root convertRect:subview.bounds
+                        fromView:subview];
+
+            if (frame.size.width <= 0.0 ||
+                frame.size.height <= 0.0 ||
+                frame.size.width > 64.0 ||
+                frame.size.height > 64.0) {
+                continue;
+            }
+
+            if (CGRectGetMidX(frame) >=
+                CGRectGetMinX(searchFrame)) {
+                continue;
+            }
+
+            CGFloat distance =
+                CGRectGetMinX(searchFrame) -
+                CGRectGetMaxX(frame);
+
+            if (distance >= -8.0 &&
+                distance < bestDistance) {
+                best = (UIButton *)subview;
+                bestDistance = distance;
+            }
+        }
+    }
+
+    return best;
+}
+
+static UIVisualEffectView *
+YTLGSearchBackGlassView(UIButton *button) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            button,
+            kYTLGSearchBackGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGSmallControlGlassEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.SearchBack";
+
+        objc_setAssociatedObject(
+            button,
+            kYTLGSearchBackGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void YTLGUpdateSearchBackGlass(
+    YTSearchViewController *controller
+) {
+    UIButton *button =
+        YTLGSearchBackButton(controller);
+
+    if (!button ||
+        !button.window ||
+        !button.superview ||
+        button.hidden ||
+        button.alpha <= 0.01) {
+        return;
+    }
+
+    UIView *host = button.superview;
+
+    UIVisualEffectView *glass =
+        YTLGSearchBackGlassView(button);
+
+    if (glass.superview != host) {
+        [glass removeFromSuperview];
+        [host insertSubview:glass
+               belowSubview:button];
+    }
+
+    CGRect buttonFrame =
+        [button convertRect:button.bounds
+                     toView:host];
+
+    CGFloat side =
+        MAX(44.0,
+            MIN(48.0,
+                MAX(buttonFrame.size.width,
+                    buttonFrame.size.height)));
+
+    CGRect frame =
+        CGRectMake(
+            CGRectGetMidX(buttonFrame) -
+                side * 0.5,
+            CGRectGetMidY(buttonFrame) -
+                side * 0.5,
+            side,
+            side
+        );
+
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        side * 0.5;
+
+    button.opaque = NO;
+    button.backgroundColor =
+        UIColor.clearColor;
+
+    [host insertSubview:glass
+           belowSubview:button];
+}
+
+static void YTLGRefreshSearchBackSoon(
+    YTSearchViewController *controller
+) {
+    if (!controller) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (controller.view.window) {
+                YTLGUpdateSearchBackGlass(
+                    controller
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassSearchBack
+
+%hook YTSearchViewController
+
+- (void)viewWillLayoutSubviews {
+    %orig;
+
+    YTLGUpdateSearchBackGlass(self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
+
+    YTLGRefreshSearchBackSoon(self);
+}
+
+%end
+
+%end
+
+
+#pragma mark - Video player top-controls Liquid Glass
+
+static const void *kYTLGPlayerLeftGlassKey =
+    &kYTLGPlayerLeftGlassKey;
+
+static const void *kYTLGPlayerRightGlassKey =
+    &kYTLGPlayerRightGlassKey;
+
+static BOOL YTLGControlHasVisibleContent(
+    UIControl *control
+) {
+    if (!control ||
+        control.hidden ||
+        control.alpha <= 0.01) {
+        return NO;
+    }
+
+    if ([control isKindOfClass:UIButton.class]) {
+        UIButton *button =
+            (UIButton *)control;
+
+        if (button.currentImage ||
+            button.currentTitle.length > 0 ||
+            button.currentBackgroundImage) {
+            return YES;
+        }
+    }
+
+    for (UIView *subview in control.subviews) {
+        if (subview.hidden ||
+            subview.alpha <= 0.01 ||
+            CGRectIsEmpty(subview.bounds)) {
+            continue;
+        }
+
+        if ([subview
+                isKindOfClass:UIImageView.class]) {
+            if (((UIImageView *)subview).image) {
+                return YES;
+            }
+
+            continue;
+        }
+
+        if ([subview
+                isKindOfClass:UILabel.class]) {
+            if (((UILabel *)subview).text.length > 0) {
+                return YES;
+            }
+
+            continue;
+        }
+
+        return YES;
+    }
+
+    return NO;
+}
+
+static void YTLGCollectPlayerControls(
+    UIView *view,
+    NSMutableArray<UIControl *> *controls
+) {
+    if (!view) return;
+
+    for (UIView *subview in view.subviews) {
+        if (subview.hidden ||
+            subview.alpha <= 0.01 ||
+            CGRectIsEmpty(subview.bounds)) {
+            continue;
+        }
+
+        CGSize size = subview.bounds.size;
+
+        BOOL iconSized =
+            size.width > 0.0 &&
+            size.height > 0.0 &&
+            size.width <= 72.0 &&
+            size.height <= 72.0;
+
+        if ([subview
+                isKindOfClass:UIControl.class] &&
+            iconSized &&
+            YTLGControlHasVisibleContent(
+                (UIControl *)subview)) {
+
+            [controls addObject:
+                (UIControl *)subview];
+
+            continue;
+        }
+
+        YTLGCollectPlayerControls(
+            subview,
+            controls
+        );
+    }
+}
+
+static UIView *
+YTLGTopPlayerControlsContainer(
+    YTMainAppControlsOverlayView *overlay
+) {
+    id value =
+        YTLGObjectIvar(
+            overlay,
+            "_topControlsAccessibilityContainerView"
+        );
+
+    if ([value isKindOfClass:UIView.class]) {
+        return (UIView *)value;
+    }
+
+    @try {
+        value =
+            [overlay valueForKey:
+                @"_topControlsAccessibilityContainerView"];
+    } @catch (__unused NSException *exception) {
+        value = nil;
+    }
+
+    return [value isKindOfClass:UIView.class]
+        ? (UIView *)value
+        : nil;
+}
+
+static UIView *
+YTLGDirectBranchUnderAncestor(
+    UIView *view,
+    UIView *ancestor
+) {
+    if (!view || !ancestor) return nil;
+
+    UIView *branch = view;
+
+    while (branch.superview &&
+           branch.superview != ancestor) {
+        branch = branch.superview;
+    }
+
+    return branch.superview == ancestor
+        ? branch
+        : nil;
+}
+
+static UIVisualEffectView *
+YTLGPlayerGroupGlass(
+    YTMainAppControlsOverlayView *overlay,
+    const void *key,
+    NSString *identifier
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            overlay,
+            key
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGSmallControlGlassEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            identifier;
+
+        objc_setAssociatedObject(
+            overlay,
+            key,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void YTLGApplyPlayerGroupGlass(
+    YTMainAppControlsOverlayView *overlay,
+    UIView *topContainer,
+    NSArray<UIControl *> *controls,
+    const void *key,
+    NSString *identifier
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            overlay,
+            key
+        );
+
+    if (controls.count == 0) {
+        glass.hidden = YES;
+        return;
+    }
+
+    CGRect unionRect = CGRectNull;
+
+    for (UIControl *control in controls) {
+        CGRect frame =
+            [control convertRect:control.bounds
+                          toView:overlay];
+
+        if (CGRectIsEmpty(frame) ||
+            frame.size.width > 80.0 ||
+            frame.size.height > 80.0) {
+            continue;
+        }
+
+        unionRect =
+            CGRectIsNull(unionRect)
+                ? frame
+                : CGRectUnion(
+                    unionRect,
+                    frame
+                );
+    }
+
+    if (CGRectIsNull(unionRect) ||
+        CGRectIsEmpty(unionRect)) {
+        if (glass) glass.hidden = YES;
+        return;
+    }
+
+    unionRect =
+        CGRectInset(
+            unionRect,
+            -8.0,
+            -5.0
+        );
+
+    CGRect safe =
+        UIEdgeInsetsInsetRect(
+            overlay.bounds,
+            overlay.safeAreaInsets
+        );
+
+    if (CGRectIsEmpty(safe)) {
+        safe = overlay.bounds;
+    }
+
+    unionRect =
+        CGRectIntersection(
+            unionRect,
+            safe
+        );
+
+    if (CGRectIsNull(unionRect) ||
+        CGRectIsEmpty(unionRect) ||
+        unionRect.size.height > 62.0 ||
+        unionRect.size.width >
+            overlay.bounds.size.width * 0.48) {
+
+        if (glass) glass.hidden = YES;
+        return;
+    }
+
+    // A single top icon should read as a circle, not a narrow lozenge.
+    if (controls.count == 1) {
+        CGFloat side =
+            MAX(
+                44.0,
+                unionRect.size.height
+            );
+
+        CGPoint center =
+            CGPointMake(
+                CGRectGetMidX(unionRect),
+                CGRectGetMidY(unionRect)
+            );
+
+        unionRect =
+            CGRectMake(
+                center.x - side * 0.5,
+                center.y - side * 0.5,
+                side,
+                side
+            );
+    }
+
+    glass =
+        YTLGPlayerGroupGlass(
+            overlay,
+            key,
+            identifier
+        );
+
+    glass.hidden = NO;
+    glass.frame = unionRect;
+    glass.layer.cornerRadius =
+        unionRect.size.height * 0.5;
+
+    UIView *branch =
+        YTLGDirectBranchUnderAncestor(
+            topContainer,
+            overlay
+        );
+
+    if (branch) {
+        if (glass.superview != overlay) {
+            [glass removeFromSuperview];
+        }
+
+        [overlay insertSubview:glass
+                 belowSubview:branch];
+    } else {
+        if (glass.superview != overlay) {
+            [glass removeFromSuperview];
+            [overlay insertSubview:glass
+                           atIndex:0];
+        }
+    }
+}
+
+static void YTLGUpdatePlayerTopGlass(
+    YTMainAppControlsOverlayView *overlay
+) {
+    if (!overlay ||
+        !overlay.window ||
+        CGRectIsEmpty(overlay.bounds)) {
+        return;
+    }
+
+    UIView *topContainer =
+        YTLGTopPlayerControlsContainer(
+            overlay
+        );
+
+    if (!topContainer ||
+        topContainer.hidden ||
+        topContainer.alpha <= 0.01) {
+
+        UIVisualEffectView *left =
+            objc_getAssociatedObject(
+                overlay,
+                kYTLGPlayerLeftGlassKey
+            );
+
+        UIVisualEffectView *right =
+            objc_getAssociatedObject(
+                overlay,
+                kYTLGPlayerRightGlassKey
+            );
+
+        left.hidden = YES;
+        right.hidden = YES;
+        return;
+    }
+
+    NSMutableArray<UIControl *> *controls =
+        [NSMutableArray array];
+
+    YTLGCollectPlayerControls(
+        topContainer,
+        controls
+    );
+
+    CGFloat midX =
+        overlay.bounds.size.width * 0.5;
+
+    NSMutableArray<UIControl *> *left =
+        [NSMutableArray array];
+
+    NSMutableArray<UIControl *> *right =
+        [NSMutableArray array];
+
+    for (UIControl *control in controls) {
+        CGRect frame =
+            [control convertRect:control.bounds
+                          toView:overlay];
+
+        // Ignore anything straddling the center; those are likely central
+        // playback controls rather than top-corner actions.
+        if (CGRectGetMaxX(frame) < midX) {
+            [left addObject:control];
+        } else if (CGRectGetMinX(frame) > midX) {
+            [right addObject:control];
+        }
+    }
+
+    YTLGApplyPlayerGroupGlass(
+        overlay,
+        topContainer,
+        left,
+        kYTLGPlayerLeftGlassKey,
+        @"YTLiquidGlass.PlayerTopLeft"
+    );
+
+    YTLGApplyPlayerGroupGlass(
+        overlay,
+        topContainer,
+        right,
+        kYTLGPlayerRightGlassKey,
+        @"YTLiquidGlass.PlayerTopRight"
+    );
+}
+
+static void YTLGRefreshPlayerTopGlassSoon(
+    YTMainAppControlsOverlayView *overlay
+) {
+    if (!overlay) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (overlay.window) {
+                YTLGUpdatePlayerTopGlass(
+                    overlay
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassPlayerTopControls
+
+%hook YTMainAppControlsOverlayView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdatePlayerTopGlass(self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        YTLGRefreshPlayerTopGlassSoon(self);
+    }
+}
+
+- (void)setTopOverlayVisible:(BOOL)visible
+    isAutonavCanceledState:(BOOL)canceledState {
+
+    %orig(visible, canceledState);
+
+    YTLGRefreshPlayerTopGlassSoon(self);
+}
+
+%end
+
+%end
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         if (NSClassFromString(@"YTPivotBarView") &&
@@ -1731,6 +2483,18 @@ YTLGRefreshActiveSearchSoon(id object) {
             NSClassFromString(@"YTSearchBarView")) {
 
             %init(YTLiquidGlassActiveSearch);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTSearchViewController")) {
+
+            %init(YTLiquidGlassSearchBack);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTMainAppControlsOverlayView")) {
+
+            %init(YTLiquidGlassPlayerTopControls);
         }
     }
 }
