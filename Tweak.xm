@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.2.1 — Selective Liquid Glass + current watch action bar
+// YTLiquidGlass v3.2.2 — Selective Liquid Glass + current watch action bar
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -3388,23 +3388,6 @@ static void YTLGUpdateChannelHeaderButtons(
     }
 }
 
-static void YTLGRefreshChannelHeaderSoon(
-    YTC4TabbedHeaderView *header
-) {
-    if (!header) return;
-
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
-            if (header.window) {
-                YTLGUpdateChannelHeaderButtons(
-                    header
-                );
-            }
-        }
-    );
-}
-
 
 
 #pragma mark - Watch-page metadata/action Liquid Glass
@@ -4393,24 +4376,6 @@ YTLGUpdateGenericPillGlass(
     }
 
     [button sendSubviewToBack:glass];
-}
-
-static void
-YTLGRefreshGenericPillSoon(
-    YTLightweightQTMButton *button
-) {
-    if (!button) return;
-
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
-            if (button.window) {
-                YTLGUpdateGenericPillGlass(
-                    button
-                );
-            }
-        }
-    );
 }
 
 
