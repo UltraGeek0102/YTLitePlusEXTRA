@@ -1,8 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
-// YTLiquidGlass v1.2 — Tab bar + header + full search + compact back + app sheets
+// YTLiquidGlass v2.0 — Consolidated non-player Liquid Glass pass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -70,8 +71,29 @@
 @end
 
 
-@interface YTActionSheetDialogViewController : UIViewController
-- (UIView *)actionSheetView;
+@interface YTActionSheetAction : NSObject
+@property(nonatomic, copy, readonly) NSString *title;
+@property(nonatomic, strong, readonly) UIImage *iconImage;
+@property(nonatomic, strong, readonly) UIButton *button;
+@property(nonatomic, copy, readonly) id handler;
+@property(nonatomic, assign, readonly) BOOL shouldDismissOnAction;
+@end
+
+@interface YTActionSheetController : NSObject
+@property(nonatomic, strong, readonly) UIView *sourceView;
+- (NSArray<YTActionSheetAction *> *)actions;
+@end
+
+@interface YTDefaultSheetController : NSObject
+- (NSArray<YTActionSheetAction *> *)actions;
+@end
+
+
+// Normal channel/profile-page header. We only touch titled action buttons
+// inside this container; player/Shorts controls are never scanned.
+@interface YTC4TabbedHeaderView : UIView
+@property(nonatomic, readonly) UIView *subscribeSwitch;
+@property(nonatomic, readonly) UIView *sponsorButton;
 @end
 
 static const void *kYTLGNativeBarKey = &kYTLGNativeBarKey;
@@ -2178,29 +2200,37 @@ static void YTLGUpdateHeaderLeftGlass(
 %end
 
 
-#pragma mark - Normal app action-sheet Liquid Glass
+#pragma mark - Native Liquid Glass action menus
 
-static const void *kYTLGActionSheetGlassKey =
-    &kYTLGActionSheetGlassKey;
+// v1.2 only put glass *behind* YouTube's GOODialogView. That still left
+// YouTube's legacy row/layout machinery in charge, so it could never look like
+// the native Apollo menu. v1.3 instead translates ordinary YouTube sheet
+// actions to UIKit UIAction/UIMenu and lets UIContextMenuInteraction present
+// the entire menu.
+//
+// Private _presentMenuAtLocation: / _UIContextMenuStyle are used deliberately:
+// Apollo Reborn uses the same UIKit path to request the compact actions-only
+// presentation. This is a sideloaded tweak, not App Store code.
 
-static BOOL YTLGClassNameLooksMediaRelated(
-    NSString *className
+static const void *kYTLGNativeMenuPresenterKey =
+    &kYTLGNativeMenuPresenterKey;
+
+static BOOL YTLGNameLooksLikeMediaUI(
+    NSString *name
 ) {
-    if (className.length == 0) return NO;
+    if (name.length == 0) return NO;
 
-    NSString *lower =
-        className.lowercaseString;
+    NSString *lower = name.lowercaseString;
 
-    NSArray<NSString *> *blocked =
-        @[
-            @"player",
-            @"watch",
-            @"reel",
-            @"short",
-            @"fullscreen",
-            @"playback",
-            @"videooverlay"
-        ];
+    NSArray<NSString *> *blocked = @[
+        @"player",
+        @"playback",
+        @"reel",
+        @"short",
+        @"watchcontroller",
+        @"fullscreen",
+        @"videooverlay"
+    ];
 
     for (NSString *needle in blocked) {
         if ([lower containsString:needle]) {
@@ -2211,257 +2241,1149 @@ static BOOL YTLGClassNameLooksMediaRelated(
     return NO;
 }
 
-static BOOL YTLGControllerTreeLooksMediaRelated(
-    UIViewController *controller
+static BOOL YTLGSourceBelongsToMediaUI(
+    UIView *source
 ) {
-    NSMutableSet *visited =
-        [NSMutableSet set];
+    if (!source) return NO;
 
-    UIViewController *cursor = controller;
-
-    // Walk presenting/parent/navigation context conservatively. If anything in
-    // the chain looks like a player/Shorts/watch controller, do not glass the
-    // sheet. This preserves the user's request to keep media UI untouched.
+    // View ancestry catches player-overlay buttons without excluding ordinary
+    // feed cells that simply happen to contain a video thumbnail.
+    UIView *view = source;
     for (NSUInteger depth = 0;
-         cursor && depth < 12;
-         depth++) {
+         view && depth < 24;
+         depth++, view = view.superview) {
 
-        NSValue *token =
-            [NSValue valueWithNonretainedObject:cursor];
-
-        if ([visited containsObject:token]) {
-            break;
-        }
-
-        [visited addObject:token];
-
-        NSString *name =
-            NSStringFromClass(
-                cursor.class
-            );
-
-        if (YTLGClassNameLooksMediaRelated(name)) {
+        if (YTLGNameLooksLikeMediaUI(
+                NSStringFromClass(view.class))) {
             return YES;
         }
+    }
 
-        if (cursor.navigationController &&
-            cursor.navigationController != cursor) {
+    // Responder ancestry catches player/watch/Shorts controllers.
+    UIResponder *responder = source;
+    for (NSUInteger depth = 0;
+         responder && depth < 32;
+         depth++, responder = responder.nextResponder) {
 
-            NSString *navName =
-                NSStringFromClass(
-                    cursor.navigationController.class
-                );
-
-            if (YTLGClassNameLooksMediaRelated(
-                    navName)) {
-                return YES;
-            }
-
-            for (UIViewController *vc
-                    in cursor.navigationController.viewControllers) {
-
-                if (YTLGClassNameLooksMediaRelated(
-                        NSStringFromClass(vc.class))) {
-                    return YES;
-                }
-            }
+        if (YTLGNameLooksLikeMediaUI(
+                NSStringFromClass(responder.class))) {
+            return YES;
         }
-
-        if (cursor.presentingViewController) {
-            cursor =
-                cursor.presentingViewController;
-            continue;
-        }
-
-        if (cursor.parentViewController) {
-            cursor =
-                cursor.parentViewController;
-            continue;
-        }
-
-        break;
     }
 
     return NO;
 }
 
-static UIVisualEffect *YTLGActionSheetEffect(void) {
-    if (@available(iOS 26.0, *)) {
-        Class glassClass =
-            NSClassFromString(@"UIGlassEffect");
+static id YTLGSafeValue(
+    id object,
+    NSString *key
+) {
+    if (!object || key.length == 0) {
+        return nil;
+    }
 
-        if (glassClass &&
-            [glassClass respondsToSelector:
-                @selector(effectWithStyle:)]) {
+    @try {
+        return [object valueForKey:key];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
 
-            UIGlassEffect *effect =
-                [UIGlassEffect
-                    effectWithStyle:
-                        UIGlassEffectStyleRegular];
+static id YTLGControllerIvarObject(
+    id object,
+    const char *name
+) {
+    if (!object || !name) return nil;
 
-            effect.interactive = NO;
-            return effect;
+    Class cls = object_getClass(object);
+
+    while (cls) {
+        Ivar ivar =
+            class_getInstanceVariable(cls, name);
+
+        if (ivar) {
+            return object_getIvar(object, ivar);
+        }
+
+        cls = class_getSuperclass(cls);
+    }
+
+    return nil;
+}
+
+static NSArray *
+YTLGActionsForSheetController(id controller) {
+    if (!controller) return @[];
+
+    if ([controller respondsToSelector:@selector(actions)]) {
+        id actions =
+            ((id (*)(id, SEL))objc_msgSend)(
+                controller,
+                @selector(actions)
+            );
+
+        if ([actions isKindOfClass:NSArray.class]) {
+            return actions;
         }
     }
 
-    return [UIBlurEffect
-        effectWithStyle:
-            UIBlurEffectStyleSystemChromeMaterial];
+    id ivarActions =
+        YTLGControllerIvarObject(
+            controller,
+            "_actions"
+        );
+
+    return [ivarActions isKindOfClass:NSArray.class]
+        ? ivarActions
+        : @[];
 }
 
-static UIVisualEffectView *
-YTLGActionSheetGlassView(
-    YTActionSheetDialogViewController *controller
+static UIView *
+YTLGSourceViewForSheetController(
+    id controller,
+    UIView *explicitSource
 ) {
-    UIVisualEffectView *glass =
-        objc_getAssociatedObject(
-            controller,
-            kYTLGActionSheetGlassKey
-        );
-
-    if (!glass) {
-        glass =
-            [[UIVisualEffectView alloc]
-                initWithEffect:
-                    YTLGActionSheetEffect()];
-
-        glass.userInteractionEnabled = NO;
-        glass.opaque = NO;
-        glass.backgroundColor =
-            UIColor.clearColor;
-        glass.clipsToBounds = YES;
-        glass.layer.cornerCurve =
-            kCACornerCurveContinuous;
-
-        glass.accessibilityIdentifier =
-            @"YTLiquidGlass.ActionSheet";
-
-        objc_setAssociatedObject(
-            controller,
-            kYTLGActionSheetGlassKey,
-            glass,
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        );
+    if (explicitSource &&
+        explicitSource.window) {
+        return explicitSource;
     }
 
-    return glass;
+    if ([controller
+            respondsToSelector:
+                @selector(sourceView)]) {
+
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                controller,
+                @selector(sourceView)
+            );
+
+        if ([value isKindOfClass:UIView.class] &&
+            ((UIView *)value).window) {
+            return (UIView *)value;
+        }
+    }
+
+    id ivarSource =
+        YTLGControllerIvarObject(
+            controller,
+            "_sourceView"
+        );
+
+    if ([ivarSource isKindOfClass:UIView.class] &&
+        ((UIView *)ivarSource).window) {
+        return (UIView *)ivarSource;
+    }
+
+    return nil;
 }
 
-static void YTLGRemoveActionSheetGlass(
-    YTActionSheetDialogViewController *controller
-) {
-    UIVisualEffectView *glass =
-        objc_getAssociatedObject(
-            controller,
-            kYTLGActionSheetGlassKey
-        );
+static NSString *
+YTLGTitleForYouTubeAction(id action) {
+    NSString *title = nil;
 
-    [glass removeFromSuperview];
+    if ([action respondsToSelector:@selector(title)]) {
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(title)
+            );
+
+        if ([value isKindOfClass:NSString.class]) {
+            title = value;
+        }
+    }
+
+    if (title.length == 0) {
+        title = YTLGSafeValue(action, @"title");
+    }
+
+    UIButton *button = nil;
+
+    if ([action respondsToSelector:@selector(button)]) {
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(button)
+            );
+
+        if ([value isKindOfClass:UIButton.class]) {
+            button = value;
+        }
+    }
+
+    if (title.length == 0) {
+        NSString *buttonTitle =
+            [button titleForState:UIControlStateNormal]
+            ?: button.currentTitle
+            ?: button.titleLabel.text;
+
+        if (buttonTitle.length > 0) {
+            title = buttonTitle;
+        }
+    }
+
+    return title;
 }
 
-static void YTLGUpdateActionSheetGlass(
-    YTActionSheetDialogViewController *controller
+static NSString *
+YTLGSubtitleForYouTubeAction(id action) {
+    id subtitle =
+        YTLGSafeValue(
+            action,
+            @"subtitle"
+        );
+
+    return [subtitle isKindOfClass:NSString.class]
+        ? subtitle
+        : nil;
+}
+
+static UIImage *
+YTLGImageForYouTubeAction(id action) {
+    UIImage *image = nil;
+
+    if ([action
+            respondsToSelector:
+                @selector(iconImage)]) {
+
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(iconImage)
+            );
+
+        if ([value isKindOfClass:UIImage.class]) {
+            image = value;
+        }
+    }
+
+    if (!image) {
+        id value =
+            YTLGSafeValue(
+                action,
+                @"iconImage"
+            );
+
+        if ([value isKindOfClass:UIImage.class]) {
+            image = value;
+        }
+    }
+
+    UIButton *button = nil;
+
+    if ([action respondsToSelector:@selector(button)]) {
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(button)
+            );
+
+        if ([value isKindOfClass:UIButton.class]) {
+            button = value;
+        }
+    }
+
+    if (!image) {
+        image =
+            [button imageForState:UIControlStateNormal]
+            ?: button.currentImage
+            ?: button.imageView.image;
+    }
+
+    if (image &&
+        image.renderingMode !=
+            UIImageRenderingModeAlwaysOriginal) {
+
+        image =
+            [image imageWithRenderingMode:
+                UIImageRenderingModeAlwaysTemplate];
+    }
+
+    return image;
+}
+
+static BOOL YTLGActionEnabled(id action) {
+    UIButton *button = nil;
+
+    if ([action respondsToSelector:@selector(button)]) {
+        id value =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(button)
+            );
+
+        if ([value isKindOfClass:UIButton.class]) {
+            button = value;
+        }
+    }
+
+    return button ? button.enabled : YES;
+}
+
+static void YTLGInvokeYouTubeAction(
+    id action
 ) {
-    if (!controller ||
-        !controller.view.window ||
-        YTLGControllerTreeLooksMediaRelated(
-            controller)) {
+    if (!action) return;
 
-        YTLGRemoveActionSheetGlass(
-            controller
+    id handler = nil;
+
+    if ([action respondsToSelector:@selector(handler)]) {
+        handler =
+            ((id (*)(id, SEL))objc_msgSend)(
+                action,
+                @selector(handler)
+            );
+    }
+
+    if (!handler) {
+        handler =
+            YTLGSafeValue(
+                action,
+                @"handler"
+            );
+    }
+
+    if (!handler) return;
+
+    // YouTube has used both no-argument handlers and handlers receiving the
+    // YTActionSheetAction. On arm64 the extra object argument is harmless for
+    // the no-argument form and preserves compatibility with the latter.
+    void (^block)(id) = handler;
+    block(action);
+}
+
+@interface YTLGNativeMenuPresenter :
+    NSObject <UIContextMenuInteractionDelegate>
+
+@property(nonatomic, strong) id youtubeSheetController;
+@property(nonatomic, weak) UIView *sourceView;
+@property(nonatomic, strong) UIContextMenuInteraction *interaction;
+@property(nonatomic, strong) UIMenu *menu;
+@property(nonatomic, copy) dispatch_block_t pendingAction;
+@property(nonatomic, assign) BOOL ending;
+
+- (BOOL)presentFromSource:(UIView *)source
+               completion:(dispatch_block_t)completion;
+- (void)finishPresentation;
+
+@end
+
+@implementation YTLGNativeMenuPresenter
+
+- (UIMenu *)buildMenu {
+    NSArray *youtubeActions =
+        YTLGActionsForSheetController(
+            self.youtubeSheetController
         );
-        return;
+
+    if (youtubeActions.count == 0) {
+        return nil;
     }
 
-    UIView *sheet =
-        [controller actionSheetView];
+    NSMutableArray<UIMenuElement *> *elements =
+        [NSMutableArray array];
 
-    if (!sheet ||
-        !sheet.superview ||
-        sheet.hidden ||
-        sheet.alpha <= 0.01 ||
-        CGRectIsEmpty(sheet.bounds)) {
-        return;
+    __weak typeof(self) weakSelf = self;
+
+    for (id youtubeAction in youtubeActions) {
+        NSString *title =
+            YTLGTitleForYouTubeAction(
+                youtubeAction
+            );
+
+        // Custom content rows / spacers cannot be represented faithfully as
+        // UIAction. If a sheet has one of those, fall back to YouTube's own
+        // presentation instead of silently dropping functionality.
+        if (title.length == 0) {
+            return nil;
+        }
+
+        UIImage *image =
+            YTLGImageForYouTubeAction(
+                youtubeAction
+            );
+
+        UIAction *nativeAction =
+            [UIAction actionWithTitle:title
+                                image:image
+                           identifier:nil
+                              handler:
+                ^(__unused UIAction *selected) {
+
+            YTLGNativeMenuPresenter *strongSelf =
+                weakSelf;
+
+            if (!strongSelf) {
+                YTLGInvokeYouTubeAction(
+                    youtubeAction
+                );
+                return;
+            }
+
+            strongSelf.pendingAction = ^{
+                YTLGInvokeYouTubeAction(
+                    youtubeAction
+                );
+            };
+
+            // Let UIKit complete the Liquid Glass dismissal before YouTube's
+            // handler presents its next screen/sheet.
+            [strongSelf.interaction dismissMenu];
+        }];
+
+        NSString *subtitle =
+            YTLGSubtitleForYouTubeAction(
+                youtubeAction
+            );
+
+        if (subtitle.length > 0 &&
+            [nativeAction
+                respondsToSelector:
+                    @selector(setSubtitle:)]) {
+            nativeAction.subtitle = subtitle;
+        }
+
+        if (!YTLGActionEnabled(
+                youtubeAction)) {
+            nativeAction.attributes |=
+                UIMenuElementAttributesDisabled;
+        }
+
+        [elements addObject:nativeAction];
     }
 
-    UIView *host = sheet.superview;
+    if (elements.count == 0) {
+        return nil;
+    }
 
-    UIVisualEffectView *glass =
-        YTLGActionSheetGlassView(
-            controller
+    return [UIMenu
+        menuWithTitle:@""
+        image:nil
+        identifier:nil
+        options:0
+        children:elements];
+}
+
+- (UIContextMenuConfiguration *)
+contextMenuInteraction:
+    (__unused UIContextMenuInteraction *)interaction
+configurationForMenuAtLocation:
+    (__unused CGPoint)location {
+
+    self.menu = [self buildMenu];
+
+    if (!self.menu) {
+        return nil;
+    }
+
+    UIMenu *menu = self.menu;
+
+    return [UIContextMenuConfiguration
+        configurationWithIdentifier:nil
+                    previewProvider:nil
+                     actionProvider:
+        ^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) {
+            return menu;
+        }];
+}
+
+// Match the compact actions-only UIKit style used by Apollo's native action
+// menus. On iOS 26/27 this is the path that produces the real Liquid Glass
+// menu rather than a preview platter + legacy menu.
+- (id)_contextMenuInteraction:
+    (__unused UIContextMenuInteraction *)interaction
+styleForMenuWithConfiguration:
+    (__unused UIContextMenuConfiguration *)configuration {
+
+    Class styleClass =
+        objc_getClass("_UIContextMenuStyle");
+
+    SEL defaultStyle =
+        NSSelectorFromString(@"defaultStyle");
+
+    if (!styleClass ||
+        ![styleClass respondsToSelector:defaultStyle]) {
+        return nil;
+    }
+
+    id style =
+        ((id (*)(id, SEL))objc_msgSend)(
+            styleClass,
+            defaultStyle
         );
 
-    if (glass.superview != host) {
-        [glass removeFromSuperview];
-        [host insertSubview:glass
-               belowSubview:sheet];
+    SEL setLayout =
+        NSSelectorFromString(
+            @"setPreferredLayout:"
+        );
+
+    if ([style respondsToSelector:setLayout]) {
+        // 3 = compact/actions-only layout used by UIKit's own button menus.
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+            style,
+            setLayout,
+            3
+        );
     }
 
-    CGRect frame =
-        [sheet convertRect:sheet.bounds
-                    toView:host];
+    SEL setOverlap =
+        NSSelectorFromString(
+            @"setShouldMenuOverlapSourcePreview:"
+        );
 
-    glass.frame = frame;
+    if ([style respondsToSelector:setOverlap]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(
+            style,
+            setOverlap,
+            YES
+        );
+    }
+
+    return style;
+}
+
+
+- (UITargetedPreview *)ytlg_previewForSource {
+    UIView *source = self.sourceView;
+
+    if (!source ||
+        !source.window ||
+        CGRectIsEmpty(source.bounds)) {
+        return nil;
+    }
+
+    UIPreviewParameters *parameters =
+        [UIPreviewParameters new];
+
+    parameters.backgroundColor =
+        UIColor.clearColor;
 
     CGFloat radius =
-        sheet.layer.cornerRadius;
+        MIN(source.bounds.size.width,
+            source.bounds.size.height) * 0.5;
 
-    if (radius <= 0.0) {
-        // YouTube's sheet corners are normally in the low/mid twenties.
-        radius = 22.0;
-    }
+    parameters.visiblePath =
+        [UIBezierPath
+            bezierPathWithRoundedRect:source.bounds
+                         cornerRadius:radius];
 
-    glass.layer.cornerRadius = radius;
+    parameters.shadowPath =
+        [UIBezierPath bezierPath];
 
-    // Remove the old opaque/flat sheet surface so the system material is what
-    // actually forms the background. Rows and actions stay untouched above it.
-    sheet.opaque = NO;
-    sheet.backgroundColor =
-        UIColor.clearColor;
-    sheet.layer.backgroundColor =
-        UIColor.clearColor.CGColor;
-
-    [host insertSubview:glass
-           belowSubview:sheet];
+    return [[UITargetedPreview alloc]
+        initWithView:source
+          parameters:parameters];
 }
 
-static void YTLGRefreshActionSheetSoon(
-    YTActionSheetDialogViewController *controller
+- (UITargetedPreview *)
+contextMenuInteraction:
+    (__unused UIContextMenuInteraction *)interaction
+previewForHighlightingMenuWithConfiguration:
+    (__unused UIContextMenuConfiguration *)configuration {
+
+    return [self ytlg_previewForSource];
+}
+
+- (UITargetedPreview *)
+contextMenuInteraction:
+    (__unused UIContextMenuInteraction *)interaction
+previewForDismissingMenuWithConfiguration:
+    (__unused UIContextMenuConfiguration *)configuration {
+
+    return [self ytlg_previewForSource];
+}
+
+- (void)contextMenuInteraction:
+    (__unused UIContextMenuInteraction *)interaction
+willEndForConfiguration:
+    (__unused UIContextMenuConfiguration *)configuration
+animator:
+    (id<UIContextMenuInteractionAnimating>)animator {
+
+    if (self.ending) return;
+    self.ending = YES;
+
+    __weak typeof(self) weakSelf = self;
+
+    if (animator) {
+        [animator addCompletion:^{
+            [weakSelf finishPresentation];
+        }];
+    } else {
+        [self finishPresentation];
+    }
+}
+
+- (void)finishPresentation {
+    UIView *source = self.sourceView;
+
+    if (self.interaction && source) {
+        [source removeInteraction:
+            self.interaction];
+    }
+
+    if (source &&
+        objc_getAssociatedObject(
+            source,
+            kYTLGNativeMenuPresenterKey
+        ) == self) {
+
+        objc_setAssociatedObject(
+            source,
+            kYTLGNativeMenuPresenterKey,
+            nil,
+            OBJC_ASSOCIATION_ASSIGN
+        );
+    }
+
+    dispatch_block_t pending =
+        self.pendingAction;
+
+    self.pendingAction = nil;
+    self.interaction = nil;
+    self.menu = nil;
+    self.youtubeSheetController = nil;
+
+    if (pending) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            pending
+        );
+    }
+}
+
+- (BOOL)presentFromSource:(UIView *)source
+               completion:(dispatch_block_t)completion {
+
+    if (!source ||
+        !source.window ||
+        YTLGSourceBelongsToMediaUI(source)) {
+        return NO;
+    }
+
+    self.sourceView = source;
+
+    // Build once before touching the view. Unsupported/custom sheets cleanly
+    // fall back to YouTube's original sheet.
+    self.menu = [self buildMenu];
+    if (!self.menu) {
+        return NO;
+    }
+
+    UIContextMenuInteraction *interaction =
+        [[UIContextMenuInteraction alloc]
+            initWithDelegate:self];
+
+    SEL present =
+        NSSelectorFromString(
+            @"_presentMenuAtLocation:"
+        );
+
+    if (![interaction respondsToSelector:present]) {
+        return NO;
+    }
+
+    self.interaction = interaction;
+
+    [source addInteraction:interaction];
+
+    objc_setAssociatedObject(
+        source,
+        kYTLGNativeMenuPresenterKey,
+        self,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC
+    );
+
+    // Apollo also asks UIKit to use the menu-driver style for programmatic
+    // presentations. Keep it conditional so a future UIKit simply ignores it.
+    SEL driver =
+        NSSelectorFromString(
+            @"_setFallbackDriverStyle:"
+        );
+
+    if ([interaction respondsToSelector:driver]) {
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(
+            interaction,
+            driver,
+            1
+        );
+    }
+
+    CGPoint point =
+        CGPointMake(
+            CGRectGetMidX(source.bounds),
+            CGRectGetMidY(source.bounds)
+        );
+
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(
+        interaction,
+        present,
+        point
+    );
+
+    if (completion) {
+        completion();
+    }
+
+    return YES;
+}
+
+@end
+
+static BOOL YTLGTryPresentNativeSheetMenu(
+    id sheetController,
+    UIView *source,
+    dispatch_block_t completion
 ) {
-    if (!controller) return;
+    UIView *resolvedSource =
+        YTLGSourceViewForSheetController(
+            sheetController,
+            source
+        );
+
+    if (!resolvedSource ||
+        YTLGSourceBelongsToMediaUI(
+            resolvedSource)) {
+        return NO;
+    }
+
+    // Retire any menu already attached to this same source.
+    YTLGNativeMenuPresenter *previous =
+        objc_getAssociatedObject(
+            resolvedSource,
+            kYTLGNativeMenuPresenterKey
+        );
+
+    if (previous) {
+        [previous.interaction dismissMenu];
+    }
+
+    YTLGNativeMenuPresenter *presenter =
+        [YTLGNativeMenuPresenter new];
+
+    presenter.youtubeSheetController =
+        sheetController;
+
+    return [presenter
+        presentFromSource:resolvedSource
+               completion:completion];
+}
+
+%group YTLiquidGlassNativeActionMenus
+
+%hook YTActionSheetController
+
+- (void)presentFromView:(UIView *)view {
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            nil)) {
+        return;
+    }
+
+    %orig(view);
+}
+
+- (void)presentFromView:(UIView *)view
+             completion:(void (^)(void))completion {
+
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            completion)) {
+        return;
+    }
+
+    %orig(view, completion);
+}
+
+- (void)presentFromView:(UIView *)view
+               animated:(BOOL)animated
+             completion:(void (^)(void))completion {
+
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            completion)) {
+        return;
+    }
+
+    %orig(view, animated, completion);
+}
+
+- (void)presentFromView:(UIView *)view
+               animated:(BOOL)animated
+             completion:(void (^)(void))completion
+             scrimColor:(UIColor *)scrimColor {
+
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            completion)) {
+        return;
+    }
+
+    %orig(view, animated, completion, scrimColor);
+}
+
+- (void)presentFromViewController:
+            (UIViewController *)viewController
+                       animated:(BOOL)animated
+                     completion:(void (^)(void))completion {
+
+    UIView *source =
+        YTLGSourceViewForSheetController(
+            self,
+            nil
+        );
+
+    if (source &&
+        YTLGTryPresentNativeSheetMenu(
+            self,
+            source,
+            completion)) {
+        return;
+    }
+
+    %orig(viewController, animated, completion);
+}
+
+%end
+
+
+%hook YTDefaultSheetController
+
+- (void)presentFromView:(UIView *)view {
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            nil)) {
+        return;
+    }
+
+    %orig(view);
+}
+
+- (void)presentFromView:(UIView *)view
+             completion:(void (^)(void))completion {
+
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            completion)) {
+        return;
+    }
+
+    %orig(view, completion);
+}
+
+- (void)presentFromView:(UIView *)view
+               animated:(BOOL)animated
+             completion:(void (^)(void))completion {
+
+    if (YTLGTryPresentNativeSheetMenu(
+            self,
+            view,
+            completion)) {
+        return;
+    }
+
+    %orig(view, animated, completion);
+}
+
+- (void)presentFromViewController:
+            (UIViewController *)viewController
+                       animated:(BOOL)animated
+                     completion:(void (^)(void))completion {
+
+    UIView *source =
+        YTLGSourceViewForSheetController(
+            self,
+            nil
+        );
+
+    if (source &&
+        YTLGTryPresentNativeSheetMenu(
+            self,
+            source,
+            completion)) {
+        return;
+    }
+
+    %orig(viewController, animated, completion);
+}
+
+%end
+
+%end
+
+
+#pragma mark - Native Liquid Glass channel/profile action buttons
+
+static const void *kYTLGNativeButtonSignatureKey =
+    &kYTLGNativeButtonSignatureKey;
+
+static void YTLGCollectTitledButtons(
+    UIView *view,
+    NSMutableArray<UIButton *> *buttons
+) {
+    if (!view) return;
+
+    for (UIView *subview in view.subviews) {
+        if (subview.hidden ||
+            subview.alpha <= 0.01 ||
+            CGRectIsEmpty(subview.bounds)) {
+            continue;
+        }
+
+        if ([subview isKindOfClass:UIButton.class]) {
+            UIButton *button = (UIButton *)subview;
+
+            NSString *title =
+                [button titleForState:UIControlStateNormal]
+                ?: button.currentTitle
+                ?: button.titleLabel.text;
+
+            // Only title-bearing action pills. This intentionally ignores
+            // avatar/icon-only controls and navigation/player buttons.
+            if (title.length > 0 &&
+                button.bounds.size.height >= 28.0 &&
+                button.bounds.size.height <= 64.0 &&
+                button.bounds.size.width >= 56.0) {
+
+                [buttons addObject:button];
+            }
+        }
+
+        YTLGCollectTitledButtons(
+            subview,
+            buttons
+        );
+    }
+}
+
+static BOOL YTLGViewIsDescendantOfView(
+    UIView *view,
+    UIView *ancestor
+) {
+    if (!view || !ancestor) return NO;
+
+    UIView *cursor = view;
+
+    while (cursor) {
+        if (cursor == ancestor) {
+            return YES;
+        }
+
+        cursor = cursor.superview;
+    }
+
+    return NO;
+}
+
+static NSString *
+YTLGNativeButtonSignature(
+    UIButton *button,
+    BOOL prominent
+) {
+    NSString *title =
+        [button titleForState:UIControlStateNormal]
+        ?: button.currentTitle
+        ?: button.titleLabel.text
+        ?: @"";
+
+    UIImage *image =
+        [button imageForState:UIControlStateNormal]
+        ?: button.currentImage;
+
+    return [NSString stringWithFormat:
+        @"%@|%lu|%d|%d",
+        title,
+        (unsigned long)image.hash,
+        prominent,
+        button.enabled
+    ];
+}
+
+static void YTLGApplyNativeGlassButton(
+    UIButton *button,
+    BOOL prominent
+) {
+    if (!button) return;
+
+    if (@available(iOS 26.0, *)) {
+        SEL regularSelector =
+            @selector(glassButtonConfiguration);
+
+        SEL prominentSelector =
+            @selector(prominentGlassButtonConfiguration);
+
+        if (![UIButtonConfiguration
+                respondsToSelector:
+                    (prominent
+                        ? prominentSelector
+                        : regularSelector)]) {
+            return;
+        }
+
+        NSString *signature =
+            YTLGNativeButtonSignature(
+                button,
+                prominent
+            );
+
+        NSString *previous =
+            objc_getAssociatedObject(
+                button,
+                kYTLGNativeButtonSignatureKey
+            );
+
+        if ([previous isEqualToString:signature] &&
+            button.configuration != nil) {
+            return;
+        }
+
+        NSString *title =
+            [button titleForState:UIControlStateNormal]
+            ?: button.currentTitle
+            ?: button.titleLabel.text;
+
+        UIImage *image =
+            [button imageForState:UIControlStateNormal]
+            ?: button.currentImage
+            ?: button.imageView.image;
+
+        UIColor *foreground =
+            [button titleColorForState:UIControlStateNormal]
+            ?: button.tintColor;
+
+        UIButtonConfiguration *configuration = nil;
+
+        if (prominent) {
+            configuration =
+                [UIButtonConfiguration
+                    prominentGlassButtonConfiguration];
+        } else {
+            configuration =
+                [UIButtonConfiguration
+                    glassButtonConfiguration];
+        }
+
+        configuration.title = title;
+
+        if (image) {
+            configuration.image = image;
+            configuration.imagePadding = 7.0;
+        }
+
+        if (foreground) {
+            configuration.baseForegroundColor =
+                foreground;
+        }
+
+        button.configuration = configuration;
+        button.automaticallyUpdatesConfiguration = YES;
+
+        // Remove the legacy filled/outlined backing. UIKit's configuration now
+        // owns the native Liquid Glass surface.
+        button.opaque = NO;
+        button.backgroundColor =
+            UIColor.clearColor;
+        button.layer.backgroundColor =
+            UIColor.clearColor.CGColor;
+
+        objc_setAssociatedObject(
+            button,
+            kYTLGNativeButtonSignatureKey,
+            signature,
+            OBJC_ASSOCIATION_COPY_NONATOMIC
+        );
+    }
+}
+
+static void YTLGUpdateChannelHeaderButtons(
+    YTC4TabbedHeaderView *header
+) {
+    if (!header ||
+        !header.window ||
+        CGRectIsEmpty(header.bounds)) {
+        return;
+    }
+
+    NSMutableArray<UIButton *> *buttons =
+        [NSMutableArray array];
+
+    YTLGCollectTitledButtons(
+        header,
+        buttons
+    );
+
+    UIView *subscribeContainer =
+        header.subscribeSwitch;
+
+    UIView *sponsorContainer =
+        header.sponsorButton;
+
+    for (UIButton *button in buttons) {
+        // The main Subscribe CTA gets prominent system glass. Join and other
+        // normal channel/profile actions use standard glass.
+        BOOL prominent =
+            subscribeContainer &&
+            YTLGViewIsDescendantOfView(
+                button,
+                subscribeContainer
+            );
+
+        // Sponsor/Join is intentionally regular, not prominent.
+        if (sponsorContainer &&
+            YTLGViewIsDescendantOfView(
+                button,
+                sponsorContainer
+            )) {
+            prominent = NO;
+        }
+
+        YTLGApplyNativeGlassButton(
+            button,
+            prominent
+        );
+    }
+}
+
+static void YTLGRefreshChannelHeaderSoon(
+    YTC4TabbedHeaderView *header
+) {
+    if (!header) return;
 
     dispatch_async(
         dispatch_get_main_queue(),
         ^{
-            if (controller.view.window) {
-                YTLGUpdateActionSheetGlass(
-                    controller
+            if (header.window) {
+                YTLGUpdateChannelHeaderButtons(
+                    header
                 );
             }
         }
     );
 }
 
-%group YTLiquidGlassNormalActionSheets
+%group YTLiquidGlassChannelActions
 
-%hook YTActionSheetDialogViewController
+%hook YTC4TabbedHeaderView
 
-- (void)viewDidLayoutSubviews {
+- (void)layoutSubviews {
     %orig;
 
-    YTLGUpdateActionSheetGlass(self);
+    YTLGUpdateChannelHeaderButtons(self);
 }
 
-- (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
+- (void)didMoveToWindow {
+    %orig;
 
-    YTLGRefreshActionSheetSoon(self);
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    %orig(animated);
-
-    YTLGRemoveActionSheetGlass(self);
+    if (self.window) {
+        YTLGRefreshChannelHeaderSoon(self);
+    }
 }
 
 %end
@@ -2507,10 +3429,18 @@ static void YTLGRefreshActionSheetSoon(
             %init(YTLiquidGlassHeaderLeft);
         }
 
-        if (NSClassFromString(@"UIGlassEffect") &&
-            NSClassFromString(@"YTActionSheetDialogViewController")) {
+        if (NSClassFromString(@"YTActionSheetController") ||
+            NSClassFromString(@"YTDefaultSheetController")) {
 
-            %init(YTLiquidGlassNormalActionSheets);
+            %init(YTLiquidGlassNativeActionMenus);
+        }
+
+        if (NSClassFromString(@"YTC4TabbedHeaderView") &&
+            [UIButtonConfiguration
+                respondsToSelector:
+                    @selector(glassButtonConfiguration)]) {
+
+            %init(YTLiquidGlassChannelActions);
         }
     }
 }
