@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.8 — Native tab bar + top navigation + search glass
+// YTLiquidGlass v0.9 — Native tab bar + top navigation + full search glass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -1497,6 +1497,215 @@ static void YTLGRefreshSearchGlassSoon(id container) {
 
 %end
 
+
+#pragma mark - Active search field Liquid Glass
+
+// YTSearchBarView is YouTube's editable top search field. It is a UITextField
+// subclass, so unlike YTSearchBoxView we must NOT insert the effect inside it.
+// The text field manages its own internal subviews on every keystroke. Instead,
+// host a sibling glass view immediately behind the field in its superview.
+
+static const void *kYTLGActiveSearchGlassKey =
+    &kYTLGActiveSearchGlassKey;
+
+static UIVisualEffect *YTLGActiveSearchEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass
+                respondsToSelector:
+                    @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static UIVisualEffectView *
+YTLGActiveSearchGlassView(UIView *field) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            field,
+            kYTLGActiveSearchGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGActiveSearchEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.ActiveSearchField";
+
+        objc_setAssociatedObject(
+            field,
+            kYTLGActiveSearchGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void
+YTLGRemoveActiveSearchGlass(UIView *field) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            field,
+            kYTLGActiveSearchGlassKey
+        );
+
+    [glass removeFromSuperview];
+}
+
+static void
+YTLGUpdateActiveSearchGlass(id object) {
+    UIView *field = (UIView *)object;
+
+    if (!field ||
+        !field.window ||
+        !field.superview ||
+        CGRectIsEmpty(field.bounds)) {
+        return;
+    }
+
+    UIView *host = field.superview;
+
+    UIVisualEffectView *glass =
+        YTLGActiveSearchGlassView(field);
+
+    if (glass.superview != host) {
+        [glass removeFromSuperview];
+
+        NSUInteger index =
+            [host.subviews
+                indexOfObjectIdenticalTo:field];
+
+        if (index == NSNotFound) {
+            [host addSubview:glass];
+            [host bringSubviewToFront:field];
+        } else {
+            [host insertSubview:glass
+                        atIndex:index];
+        }
+    }
+
+    CGRect frame =
+        [field convertRect:field.bounds
+                    toView:host];
+
+    // Keep the glass exactly aligned with YouTube's editable field.
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        frame.size.height * 0.5;
+
+    // Remove Google's flat fill. The text/caret/clear button continue to be
+    // drawn by the original field above the system glass.
+    field.opaque = NO;
+    field.backgroundColor =
+        UIColor.clearColor;
+
+    // UITextField subclasses sometimes use a CALayer fill in addition to
+    // backgroundColor.
+    field.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    [host insertSubview:glass
+           belowSubview:field];
+}
+
+static void
+YTLGRefreshActiveSearchSoon(id object) {
+    if (!object) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            UIView *field =
+                (UIView *)object;
+
+            if (field.window) {
+                YTLGUpdateActiveSearchGlass(
+                    object
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassActiveSearch
+
+%hook YTSearchBarView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateActiveSearchGlass(self);
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+
+    UIView *field = (UIView *)self;
+
+    if (field.superview) {
+        YTLGRefreshActiveSearchSoon(self);
+    } else {
+        YTLGRemoveActiveSearchGlass(field);
+    }
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    UIView *field = (UIView *)self;
+
+    if (field.window) {
+        YTLGRefreshActiveSearchSoon(self);
+    } else {
+        YTLGRemoveActiveSearchGlass(field);
+    }
+}
+
+- (void)setBackgroundColor:(UIColor *)color {
+    // On Liquid Glass builds the sibling material owns the background.
+    // Keep YouTube's own text/caret/content, but do not let it repaint the
+    // legacy flat grey capsule over the glass.
+    if (@available(iOS 26.0, *)) {
+        %orig(UIColor.clearColor);
+        YTLGRefreshActiveSearchSoon(self);
+        return;
+    }
+
+    %orig(color);
+}
+
+%end
+
+%end
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         if (NSClassFromString(@"YTPivotBarView") &&
@@ -1516,6 +1725,12 @@ static void YTLGRefreshSearchGlassSoon(id container) {
             NSClassFromString(@"YTSearchBoxView")) {
 
             %init(YTLiquidGlassSearchBox);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTSearchBarView")) {
+
+            %init(YTLiquidGlassActiveSearch);
         }
     }
 }
