@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.5 — Standalone native UITabBar bridge
+// YTLiquidGlass v0.6 — Standalone native UITabBar bridge
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -16,6 +16,8 @@
 
 @interface YTIPivotBarItemRenderer : NSObject
 @property(nonatomic, copy, readonly) NSString *pivotIdentifier;
+// YouTube uses this for thumbnail-backed pivot items such as the account/avatar tab.
+@property(nonatomic, strong, readonly) id thumbnail;
 @end
 
 @interface YTIPivotBarIconOnlyItemRenderer : NSObject
@@ -303,16 +305,40 @@ YTLGAncestorPivotBar(UIView *view) {
 
 #pragma mark - Native item appearance
 
-static UIImage *YTLGNativeImage(UIImage *image) {
+static BOOL
+YTLGItemUsesOriginalArtwork(YTPivotBarItemView *item) {
+    if (!item) {
+        return NO;
+    }
+
+    // YouTube's profile/account pivot is thumbnail-backed rather than a normal
+    // vector icon. Never template-tint thumbnail artwork: doing so turns the
+    // account picture into a flat white/blue silhouette.
+    id thumbnail = item.renderer.thumbnail;
+    if (thumbnail != nil) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static UIImage *
+YTLGNativeImage(UIImage *image, BOOL preserveOriginal) {
     if (![image isKindOfClass:UIImage.class]) {
         return nil;
     }
 
-    if (image.renderingMode ==
-        UIImageRenderingModeAlwaysOriginal) {
-        return image;
+    if (preserveOriginal ||
+        image.renderingMode ==
+            UIImageRenderingModeAlwaysOriginal) {
+
+        return [image
+            imageWithRenderingMode:
+                UIImageRenderingModeAlwaysOriginal];
     }
 
+    // Normal tab glyphs stay template images so UIKit's native Liquid Glass
+    // bar can apply adaptive selected/unselected coloring.
     return [image
         imageWithRenderingMode:
             UIImageRenderingModeAlwaysTemplate];
@@ -384,7 +410,10 @@ YTLGNormalImageForItem(
         image = button.imageView.image;
     }
 
-    return YTLGNativeImage(image);
+    return YTLGNativeImage(
+        image,
+        YTLGItemUsesOriginalArtwork(item)
+    );
 }
 
 static UIImage *
@@ -411,7 +440,10 @@ YTLGSelectedImageForItem(
         image = fallback;
     }
 
-    return YTLGNativeImage(image);
+    return YTLGNativeImage(
+        image,
+        YTLGItemUsesOriginalArtwork(item)
+    );
 }
 
 static NSString *
