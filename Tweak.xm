@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// YTLiquidGlass v0.6 — Standalone native UITabBar bridge
+// YTLiquidGlass v0.7 — Native tab bar + top navigation glass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -49,6 +49,16 @@
 @property(nonatomic, strong, readonly) UIButton *navigationButton;
 @property(nonatomic, weak, readonly) YTPivotBarViewController *delegate;
 - (void)setRenderer:(id)renderer;
+@end
+
+// Dedicated YouTube container for the top-right navigation controls.
+// Current YouTubeHeader exposes this class publicly, so we can target the
+// header controls without touching arbitrary YTQTMButton instances elsewhere.
+@interface YTRightNavigationButtons : UIView
+@property(nonatomic, assign) CGFloat leadingPadding;
+@property(nonatomic, assign) CGFloat tailingPadding;
+- (id)buttonForType:(NSUInteger)type;
+- (void)setButton:(id)button forType:(NSUInteger)type;
 @end
 
 static const void *kYTLGNativeBarKey = &kYTLGNativeBarKey;
@@ -1031,6 +1041,321 @@ static void YTLGInstallForController(
 
 %end
 
+
+#pragma mark - Top navigation Liquid Glass
+
+static const void *kYTLGTopNavGlassKey = &kYTLGTopNavGlassKey;
+
+static UIVisualEffect *YTLGTopNavigationGlassEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass = NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+
+            // The YouTube buttons remain the hit-test owners above this
+            // sibling glass surface.
+            effect.interactive = NO;
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static void YTLGCollectTopNavigationControls(
+    UIView *view,
+    NSMutableArray<UIControl *> *controls
+) {
+    if (!view) return;
+
+    for (UIView *subview in view.subviews) {
+        if (subview.hidden ||
+            subview.alpha <= 0.01 ||
+            CGRectIsEmpty(subview.bounds)) {
+            continue;
+        }
+
+        if ([subview isKindOfClass:UIControl.class]) {
+            [controls addObject:(UIControl *)subview];
+            continue;
+        }
+
+        YTLGCollectTopNavigationControls(
+            subview,
+            controls
+        );
+    }
+}
+
+static CGRect YTLGTopNavigationContentRect(
+    YTRightNavigationButtons *container
+) {
+    NSMutableArray<UIControl *> *controls =
+        [NSMutableArray array];
+
+    YTLGCollectTopNavigationControls(
+        container,
+        controls
+    );
+
+    CGRect unionRect = CGRectNull;
+
+    for (UIControl *control in controls) {
+        CGRect frame =
+            [control convertRect:control.bounds
+                          toView:container];
+
+        if (CGRectIsEmpty(frame) ||
+            frame.size.width < 4.0 ||
+            frame.size.height < 4.0) {
+            continue;
+        }
+
+        unionRect =
+            CGRectIsNull(unionRect)
+                ? frame
+                : CGRectUnion(unionRect, frame);
+    }
+
+    if (CGRectIsNull(unionRect) ||
+        CGRectIsEmpty(unionRect)) {
+
+        unionRect = container.bounds;
+    }
+
+    // Native navigation glass typically has a little optical breathing room
+    // around the 44pt button targets.
+    unionRect = CGRectInset(
+        unionRect,
+        -6.0,
+        -4.0
+    );
+
+    // Keep the glass inside the actual navigation container when possible.
+    CGRect bounds = container.bounds;
+
+    if (!CGRectIsEmpty(bounds)) {
+        CGFloat minX = MAX(CGRectGetMinX(bounds),
+                           CGRectGetMinX(unionRect));
+        CGFloat minY = MAX(CGRectGetMinY(bounds),
+                           CGRectGetMinY(unionRect));
+        CGFloat maxX = MIN(CGRectGetMaxX(bounds),
+                           CGRectGetMaxX(unionRect));
+        CGFloat maxY = MIN(CGRectGetMaxY(bounds),
+                           CGRectGetMaxY(unionRect));
+
+        if (maxX > minX && maxY > minY) {
+            unionRect =
+                CGRectMake(
+                    minX,
+                    minY,
+                    maxX - minX,
+                    maxY - minY
+                );
+        }
+    }
+
+    // A single icon should still get a proper round 44pt glass surface.
+    CGFloat targetHeight =
+        MAX(44.0, unionRect.size.height);
+
+    CGFloat targetWidth =
+        MAX(targetHeight, unionRect.size.width);
+
+    CGPoint center =
+        CGPointMake(
+            CGRectGetMidX(unionRect),
+            CGRectGetMidY(unionRect)
+        );
+
+    return CGRectMake(
+        center.x - targetWidth * 0.5,
+        center.y - targetHeight * 0.5,
+        targetWidth,
+        targetHeight
+    );
+}
+
+static UIVisualEffectView *
+YTLGTopNavigationGlassView(
+    YTRightNavigationButtons *container
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            container,
+            kYTLGTopNavGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGTopNavigationGlassEffect()];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor = UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.TopNavigation";
+
+        objc_setAssociatedObject(
+            container,
+            kYTLGTopNavGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void YTLGRemoveTopNavigationGlass(
+    YTRightNavigationButtons *container
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            container,
+            kYTLGTopNavGlassKey
+        );
+
+    [glass removeFromSuperview];
+}
+
+static void YTLGUpdateTopNavigationGlass(
+    YTRightNavigationButtons *container
+) {
+    if (!container ||
+        !container.window ||
+        !container.superview ||
+        CGRectIsEmpty(container.bounds)) {
+        return;
+    }
+
+    UIView *host = container.superview;
+
+    UIVisualEffectView *glass =
+        YTLGTopNavigationGlassView(container);
+
+    // Host the effect as a sibling immediately behind YouTube's button
+    // container. This lets the material sample the real page/header backdrop
+    // and avoids placing a backdrop effect *inside* another control hierarchy.
+    if (glass.superview != host) {
+        [glass removeFromSuperview];
+
+        NSUInteger index =
+            [host.subviews indexOfObjectIdenticalTo:container];
+
+        if (index == NSNotFound) {
+            [host addSubview:glass];
+            [host bringSubviewToFront:container];
+        } else {
+            [host insertSubview:glass
+                        atIndex:index];
+        }
+    }
+
+    CGRect localRect =
+        YTLGTopNavigationContentRect(container);
+
+    CGRect hostRect =
+        [container convertRect:localRect
+                        toView:host];
+
+    glass.frame = hostRect;
+
+    CGFloat radius =
+        MIN(
+            hostRect.size.height * 0.5,
+            24.0
+        );
+
+    glass.layer.cornerRadius =
+        MAX(0.0, radius);
+
+    // Remove the legacy flat backing while keeping every original button,
+    // target/action, accessibility label and avatar untouched.
+    container.opaque = NO;
+    container.backgroundColor =
+        UIColor.clearColor;
+    container.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    // The glass must remain immediately below YouTube's live controls.
+    [host insertSubview:glass
+           belowSubview:container];
+}
+
+static void YTLGRefreshTopNavigationSoon(
+    YTRightNavigationButtons *container
+) {
+    if (!container) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (container.window) {
+                YTLGUpdateTopNavigationGlass(
+                    container
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassTopNavigation
+
+%hook YTRightNavigationButtons
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateTopNavigationGlass(self);
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+
+    if (self.superview) {
+        YTLGRefreshTopNavigationSoon(self);
+    } else {
+        YTLGRemoveTopNavigationGlass(self);
+    }
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        YTLGRefreshTopNavigationSoon(self);
+    } else {
+        YTLGRemoveTopNavigationGlass(self);
+    }
+}
+
+- (void)setButton:(id)button
+          forType:(NSUInteger)type {
+
+    %orig(button, type);
+
+    // Search/cast/notifications/account controls can be added/removed
+    // dynamically. Recompute the capsule from whatever buttons YouTube
+    // actually has after that update.
+    YTLGRefreshTopNavigationSoon(self);
+}
+
+%end
+
+%end
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         if (NSClassFromString(@"YTPivotBarView") &&
@@ -1038,6 +1363,12 @@ static void YTLGInstallForController(
             NSClassFromString(@"YTPivotBarViewController")) {
 
             %init(YTLiquidGlassStandaloneTabBar);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTRightNavigationButtons")) {
+
+            %init(YTLiquidGlassTopNavigation);
         }
     }
 }
