@@ -1,4 +1,4 @@
-// YTLiquidGlass FINAL STABLE + YTKACE tab icon compatibility
+// YTLiquidGlass FINAL STABLE + YTKACE tab icon compatibility (build fix)
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -404,14 +404,14 @@ YTLGCustomOverlayImageForItem(
 
     // YTKACE uses 0x59414345 for its main custom tab icon and
     // 0x59414349 for extra-tab replacement icons.
-    for (NSInteger tagValue in
+    for (NSNumber *tagNumber in
             @[@(0x59414345),
               @(0x59414349)]) {
 
         UIView *candidate =
             [item
                 viewWithTag:
-                    tagValue.integerValue];
+                    tagNumber.integerValue];
 
         if ([candidate
                 isKindOfClass:
