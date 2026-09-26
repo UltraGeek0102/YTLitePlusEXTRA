@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.1 — Selective non-player Liquid Glass cleanup
+// YTLiquidGlass v3.2 — Selective Liquid Glass + current watch action bar
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -100,7 +100,13 @@
 // These are the controls shown BELOW a normal watch-page video. They are
 // metadata/action UI, not part of the player overlay.
 @interface YTSlimVideoDetailsActionView : UIView
-@property(nonatomic, readonly) UIButton *button;
+// Current YouTubeHeader exposes the label/toggle state, but no longer exposes
+// the old child `button` property used by earlier YouTube builds.
+@property(nonatomic, strong, readwrite) UILabel *label;
+@property(nonatomic, assign, readwrite, getter=isToggled) BOOL toggled;
+@end
+
+@interface YTSlimVideoScrollableActionBarCell : UICollectionViewCell
 @end
 
 @interface YTSlimVideoOwnerView : UIView
@@ -3576,29 +3582,9 @@ YTLGUpdateWatchActionGlass(
 ) {
     if (!actionView ||
         !actionView.window ||
+        actionView.hidden ||
+        actionView.alpha <= 0.01 ||
         CGRectIsEmpty(actionView.bounds)) {
-        return;
-    }
-
-    UIButton *button =
-        actionView.button;
-
-    if (!button) {
-        // Older/newer YouTube builds may expose the button only as _button.
-        id value =
-            YTLGWatchObjectIvar(
-                actionView,
-                "_button"
-            );
-
-        if ([value isKindOfClass:UIButton.class]) {
-            button = (UIButton *)value;
-        }
-    }
-
-    if (!button ||
-        button.hidden ||
-        button.alpha <= 0.01) {
         return;
     }
 
@@ -3610,50 +3596,106 @@ YTLGUpdateWatchActionGlass(
             @"YTLiquidGlass.WatchAction"
         );
 
-    CGRect buttonFrame =
-        [button convertRect:button.bounds
-                     toView:actionView];
+    UILabel *label = nil;
 
-    if (CGRectIsEmpty(buttonFrame)) {
-        buttonFrame = actionView.bounds;
+    if ([actionView
+            respondsToSelector:
+                @selector(label)]) {
+        label = actionView.label;
     }
 
-    // Compact native circular glass around each action glyph.
-    CGFloat side =
-        MAX(
-            40.0,
+    BOOL hasVisibleTitle =
+        label &&
+        !label.hidden &&
+        label.alpha > 0.01 &&
+        ((label.text.length > 0) ||
+         (label.attributedText.length > 0));
+
+    CGRect bounds = actionView.bounds;
+
+    if (hasVisibleTitle) {
+        // Current watch-page text actions (including Subscribe on layouts that
+        // use the unified slim action bar) should read as a proper capsule.
+        CGFloat horizontalInset = 2.0;
+        CGFloat verticalInset = 2.0;
+
+        CGRect frame =
+            CGRectInset(
+                bounds,
+                horizontalInset,
+                verticalInset
+            );
+
+        if (frame.size.width < 44.0) {
+            frame = CGRectMake(
+                CGRectGetMidX(bounds) - 22.0,
+                frame.origin.y,
+                44.0,
+                frame.size.height
+            );
+        }
+
+        glass.frame = frame;
+        glass.layer.cornerRadius =
+            frame.size.height * 0.5;
+    } else {
+        // Icon-only Like/Dislike/Share/Thanks/More actions get one compact
+        // native-looking glass circle centered on the action view itself.
+        CGFloat available =
             MIN(
-                46.0,
+                bounds.size.width,
+                bounds.size.height
+            );
+
+        CGFloat side =
+            MIN(
+                44.0,
                 MAX(
-                    buttonFrame.size.width,
-                    buttonFrame.size.height
+                    38.0,
+                    available - 2.0
                 )
-            )
-        );
+            );
 
-    CGPoint center =
-        CGPointMake(
-            CGRectGetMidX(buttonFrame),
-            CGRectGetMidY(buttonFrame)
-        );
+        CGPoint center =
+            CGPointMake(
+                CGRectGetMidX(bounds),
+                CGRectGetMidY(bounds)
+            );
 
-    CGRect frame =
-        CGRectMake(
-            center.x - side * 0.5,
-            center.y - side * 0.5,
-            side,
-            side
-        );
+        glass.frame =
+            CGRectMake(
+                center.x - side * 0.5,
+                center.y - side * 0.5,
+                side,
+                side
+            );
 
-    glass.frame = frame;
-    glass.layer.cornerRadius =
-        side * 0.5;
+        glass.layer.cornerRadius =
+            side * 0.5;
+    }
 
-    YTLGClearLegacyControlBackground(
-        button
-    );
+    if (@available(iOS 26.0, *)) {
+        if ([glass.effect
+                isKindOfClass:
+                    NSClassFromString(@"UIGlassEffect")]) {
 
-    // Keep YouTube's icon/control above the material.
+            UIGlassEffect *effect =
+                (UIGlassEffect *)glass.effect;
+
+            effect.tintColor =
+                actionView.isToggled
+                    ? [UIColor.labelColor
+                        colorWithAlphaComponent:0.14]
+                    : nil;
+        }
+    }
+
+    actionView.opaque = NO;
+    actionView.backgroundColor =
+        UIColor.clearColor;
+    actionView.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
     [actionView sendSubviewToBack:glass];
 }
 
@@ -3867,6 +3909,188 @@ YTLGRefreshWatchOwnerGlassSoon(
 
 %end
 
+
+
+
+#pragma mark - Current watch-page action-bar fallback
+
+// Current YouTube still exposes YTSlimVideoScrollableActionBarCell. Refreshing
+// from this container makes the glass survive renderer/layout rebuilds and lets
+// us find renamed Subscribe controls without applying a global button hook.
+
+static BOOL
+YTLGTextLooksLikeSubscribeState(
+    NSString *text
+) {
+    if (text.length == 0) {
+        return NO;
+    }
+
+    NSString *lower =
+        text.lowercaseString;
+
+    return
+        [lower isEqualToString:@"subscribe"] ||
+        [lower isEqualToString:@"subscribed"];
+}
+
+static BOOL
+YTLGLooksLikeScopedSubscribeControl(
+    UIView *view
+) {
+    if (!view ||
+        view.hidden ||
+        view.alpha <= 0.01 ||
+        CGRectIsEmpty(view.bounds)) {
+        return NO;
+    }
+
+    NSString *className =
+        NSStringFromClass(view.class)
+            .lowercaseString;
+
+    if ([className containsString:@"subscribe"] &&
+        ![className containsString:@"subscription"]) {
+        return YES;
+    }
+
+    NSString *identifier =
+        view.accessibilityIdentifier
+            .lowercaseString;
+
+    if ([identifier containsString:@"subscribe"] &&
+        ![identifier containsString:@"subscription"]) {
+        return YES;
+    }
+
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button =
+            (UIButton *)view;
+
+        NSString *title =
+            [button titleForState:UIControlStateNormal]
+            ?: button.currentTitle
+            ?: button.titleLabel.text;
+
+        if (YTLGTextLooksLikeSubscribeState(title)) {
+            return YES;
+        }
+    }
+
+    NSString *a11y =
+        view.accessibilityLabel;
+
+    if (YTLGTextLooksLikeSubscribeState(a11y)) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static void
+YTLGRefreshCurrentWatchActionTree(
+    UIView *root
+) {
+    if (!root) return;
+
+    Class actionClass =
+        NSClassFromString(
+            @"YTSlimVideoDetailsActionView"
+        );
+
+    NSMutableArray<UIView *> *stack =
+        [NSMutableArray
+            arrayWithObject:root];
+
+    while (stack.count > 0) {
+        UIView *candidate =
+            stack.lastObject;
+
+        [stack removeLastObject];
+
+        // Never recurse into glass views we created ourselves.
+        if ([candidate.accessibilityIdentifier
+                hasPrefix:@"YTLiquidGlass."]) {
+            continue;
+        }
+
+        if (actionClass &&
+            [candidate
+                isKindOfClass:actionClass]) {
+
+            YTLGUpdateWatchActionGlass(
+                (YTSlimVideoDetailsActionView *)
+                    candidate
+            );
+
+            // The action view owns its visual content; no need to look for a
+            // fake child button anymore.
+            continue;
+        }
+
+        if (candidate != root &&
+            YTLGLooksLikeScopedSubscribeControl(
+                candidate)) {
+
+            // This scan exists only inside the watch action-bar cell, so it
+            // cannot accidentally glass Home/Subscriptions/channel tabs.
+            YTLGUpdateWatchSubscribeGlass(
+                candidate
+            );
+
+            continue;
+        }
+
+        for (UIView *subview
+                in candidate.subviews) {
+            [stack addObject:subview];
+        }
+    }
+}
+
+static void
+YTLGRefreshCurrentWatchActionTreeSoon(
+    UIView *root
+) {
+    if (!root) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (root.window) {
+                YTLGRefreshCurrentWatchActionTree(
+                    root
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassCurrentWatchActionBar
+
+%hook YTSlimVideoScrollableActionBarCell
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGRefreshCurrentWatchActionTree(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        YTLGRefreshCurrentWatchActionTreeSoon(
+            self
+        );
+    }
+}
+
+%end
+
+%end
 
 
 #pragma mark - Reusable normal-app helpers + subscription controls
@@ -4444,6 +4668,12 @@ YTLGShouldGlassSubscribeControl(
              NSClassFromString(@"YTSlimVideoOwnerView"))) {
 
             %init(YTLiquidGlassWatchMetadataActions);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTSlimVideoScrollableActionBarCell")) {
+
+            %init(YTLiquidGlassCurrentWatchActionBar);
         }
 
         if (NSClassFromString(@"UIGlassEffect") &&
