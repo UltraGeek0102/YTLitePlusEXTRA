@@ -28,10 +28,16 @@
 static const void *kYTLGBarGlassKey = &kYTLGBarGlassKey;
 static const void *kYTLGItemGlassKey = &kYTLGItemGlassKey;
 
-static UIVisualEffect *YTLGGlassEffect(UIGlassEffectStyle style) {
+// Keep the tweak loadable with the existing iOS 15 deployment target.
+// iOS 26-only enum types and constants are referenced only inside the
+// availability-guarded block so Clang does not emit unguarded-availability
+// errors when building against the iOS 27 SDK.
+static UIVisualEffect *YTLGGlassEffect(BOOL clearStyle) {
     if (@available(iOS 26.0, *)) {
         Class glassClass = NSClassFromString(@"UIGlassEffect");
         if (glassClass && [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+            UIGlassEffectStyle style =
+                clearStyle ? UIGlassEffectStyleClear : UIGlassEffectStyleRegular;
             return [UIGlassEffect effectWithStyle:style];
         }
     }
@@ -49,7 +55,7 @@ static void YTLGConfigureGlassView(UIVisualEffectView *view) {
 static UIVisualEffectView *YTLGBarGlassView(UIView *bar) {
     UIVisualEffectView *glass = objc_getAssociatedObject(bar, kYTLGBarGlassKey);
     if (!glass) {
-        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(UIGlassEffectStyleRegular)];
+        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(NO)];
         YTLGConfigureGlassView(glass);
         glass.accessibilityIdentifier = @"YTLiquidGlass.TabBarBackground";
         [bar insertSubview:glass atIndex:0];
@@ -61,7 +67,7 @@ static UIVisualEffectView *YTLGBarGlassView(UIView *bar) {
 static UIVisualEffectView *YTLGItemGlassView(UIView *item) {
     UIVisualEffectView *glass = objc_getAssociatedObject(item, kYTLGItemGlassKey);
     if (!glass) {
-        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(UIGlassEffectStyleClear)];
+        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(YES)];
         YTLGConfigureGlassView(glass);
         glass.accessibilityIdentifier = @"YTLiquidGlass.SelectedTab";
 
