@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v2.1 — Consolidated non-player Liquid Glass + watch-page actions
+// YTLiquidGlass v3.0 — Consolidated non-player Liquid Glass + global pills/subscription controls
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -108,6 +108,23 @@
 @property(nonatomic, strong) UIView *sponsorButton;
 @property(nonatomic, readonly) UIView *notificationMultiToggleButton;
 @property(nonatomic, readonly) UIView *notificationToggleButton;
+@end
+
+
+// Reusable YouTube/Google controls used throughout normal non-player UI.
+@interface YTLightweightQTMButton : UIButton
+@property(nonatomic, strong) UIColor *enabledBackgroundColor;
+@property(nonatomic, strong) UIColor *disabledBackgroundColorLight;
+@property(nonatomic, strong) UIColor *disabledBackgroundColorDark;
+@end
+
+@interface YTSubscribeSwitch : UIControl
+@end
+
+@interface YTNotificationPreferenceToggleButton : UIButton
+@end
+
+@interface YTNotificationMultiToggleButton : UIButton
 @end
 
 static const void *kYTLGNativeBarKey = &kYTLGNativeBarKey;
@@ -3407,197 +3424,154 @@ static void YTLGRefreshChannelHeaderSoon(
 
 #pragma mark - Watch-page metadata/action Liquid Glass
 
-// The controls in this module live BELOW the normal video player:
-// Subscribe, Like, Dislike, Share, Thanks, More, notification, etc.
-// No player-overlay class is hooked here.
+// v2.1 attempted to apply UIButtonConfiguration to YouTube's metadata controls.
+// The screenshot proved that YouTube re-styles those custom controls afterwards,
+// so the native configuration never became visible.
+//
+// v2.2 instead adds actual UIGlassEffect surfaces behind the existing controls.
+// The original YouTube controls remain responsible for hit-testing, state,
+// actions and layout. The actual player overlay is still completely untouched.
 
-static const void *kYTLGWatchActionSignatureKey =
-    &kYTLGWatchActionSignatureKey;
+static const void *kYTLGWatchActionGlassKey =
+    &kYTLGWatchActionGlassKey;
 
-static UIButton *
-YTLGFirstButtonDescendant(UIView *view) {
-    if (!view) return nil;
+static const void *kYTLGWatchSubscribeGlassKey =
+    &kYTLGWatchSubscribeGlassKey;
 
-    if ([view isKindOfClass:UIButton.class]) {
-        return (UIButton *)view;
+static const void *kYTLGWatchSecondaryGlassKey =
+    &kYTLGWatchSecondaryGlassKey;
+
+static UIVisualEffect *
+YTLGWatchRegularGlassEffect(BOOL prominent) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:
+                @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+
+            if (prominent) {
+                // Slight adaptive tint so Subscribe reads as the primary CTA
+                // without reverting to YouTube's old opaque white pill.
+                effect.tintColor =
+                    [UIColor.labelColor
+                        colorWithAlphaComponent:0.12];
+            }
+
+            return effect;
+        }
     }
 
-    for (UIView *subview in view.subviews) {
-        UIButton *button =
-            YTLGFirstButtonDescendant(subview);
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
 
-        if (button) {
-            return button;
+static UIVisualEffectView *
+YTLGWatchGlassForView(
+    UIView *owner,
+    const void *key,
+    BOOL prominent,
+    NSString *identifier
+) {
+    if (!owner) return nil;
+
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            owner,
+            key
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGWatchRegularGlassEffect(
+                        prominent
+                    )];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            identifier;
+
+        [owner insertSubview:glass
+                    atIndex:0];
+
+        objc_setAssociatedObject(
+            owner,
+            key,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static id
+YTLGWatchObjectIvar(
+    id object,
+    const char *name
+) {
+    if (!object || !name) return nil;
+
+    Class cls = object_getClass(object);
+
+    while (cls) {
+        Ivar ivar =
+            class_getInstanceVariable(
+                cls,
+                name
+            );
+
+        if (ivar) {
+            return object_getIvar(
+                object,
+                ivar
+            );
         }
+
+        cls = class_getSuperclass(cls);
     }
 
     return nil;
 }
 
-static NSArray<UIButton *> *
-YTLGButtonDescendants(UIView *view) {
-    if (!view) return @[];
-
-    NSMutableArray<UIButton *> *buttons =
-        [NSMutableArray array];
-
-    NSMutableArray<UIView *> *stack =
-        [NSMutableArray arrayWithObject:view];
-
-    while (stack.count > 0) {
-        UIView *candidate = stack.lastObject;
-        [stack removeLastObject];
-
-        for (UIView *subview in candidate.subviews) {
-            if ([subview isKindOfClass:UIButton.class]) {
-                [buttons addObject:(UIButton *)subview];
-            }
-
-            [stack addObject:subview];
-        }
-    }
-
-    return buttons;
-}
-
-static NSString *
-YTLGWatchActionButtonSignature(
-    UIButton *button,
-    BOOL prominent,
-    BOOL iconOnly
+static void
+YTLGClearLegacyControlBackground(
+    UIView *view
 ) {
-    NSString *title =
-        [button titleForState:UIControlStateNormal]
-        ?: button.currentTitle
-        ?: button.titleLabel.text
-        ?: @"";
+    if (!view) return;
 
-    UIImage *image =
-        [button imageForState:UIControlStateNormal]
-        ?: button.currentImage
-        ?: button.imageView.image;
-
-    return [NSString stringWithFormat:
-        @"%@|%lu|%d|%d|%d",
-        title,
-        (unsigned long)image.hash,
-        prominent,
-        iconOnly,
-        button.enabled
-    ];
+    view.opaque = NO;
+    view.backgroundColor =
+        UIColor.clearColor;
+    view.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
 }
 
 static void
-YTLGApplyWatchNativeGlassButton(
-    UIButton *button,
-    BOOL prominent,
-    BOOL preferIconOnly
-) {
-    if (!button) return;
-
-    if (@available(iOS 26.0, *)) {
-        SEL selector =
-            prominent
-                ? @selector(prominentGlassButtonConfiguration)
-                : @selector(glassButtonConfiguration);
-
-        if (![UIButtonConfiguration
-                respondsToSelector:selector]) {
-            return;
-        }
-
-        NSString *signature =
-            YTLGWatchActionButtonSignature(
-                button,
-                prominent,
-                preferIconOnly
-            );
-
-        NSString *previous =
-            objc_getAssociatedObject(
-                button,
-                kYTLGWatchActionSignatureKey
-            );
-
-        if ([previous isEqualToString:signature] &&
-            button.configuration != nil) {
-            return;
-        }
-
-        NSString *title =
-            [button titleForState:UIControlStateNormal]
-            ?: button.currentTitle
-            ?: button.titleLabel.text;
-
-        UIImage *image =
-            [button imageForState:UIControlStateNormal]
-            ?: button.currentImage
-            ?: button.imageView.image;
-
-        UIButtonConfiguration *configuration =
-            prominent
-                ? [UIButtonConfiguration
-                    prominentGlassButtonConfiguration]
-                : [UIButtonConfiguration
-                    glassButtonConfiguration];
-
-        // Preserve YouTube's own symbol/artwork.
-        configuration.image = image;
-
-        if (!preferIconOnly &&
-            title.length > 0) {
-            configuration.title = title;
-            configuration.imagePadding = 7.0;
-        } else {
-            configuration.title = nil;
-
-            // Compact icon controls should read as native round/capsule glass,
-            // not oversized empty pills.
-            configuration.contentInsets =
-                NSDirectionalEdgeInsetsMake(
-                    8.0,
-                    8.0,
-                    8.0,
-                    8.0
-                );
-        }
-
-        configuration.cornerStyle =
-            UIButtonConfigurationCornerStyleCapsule;
-
-        UIColor *foreground =
-            [button titleColorForState:UIControlStateNormal]
-            ?: button.tintColor;
-
-        if (foreground) {
-            configuration.baseForegroundColor =
-                foreground;
-        }
-
-        button.configuration = configuration;
-        button.automaticallyUpdatesConfiguration = YES;
-
-        button.opaque = NO;
-        button.backgroundColor =
-            UIColor.clearColor;
-        button.layer.backgroundColor =
-            UIColor.clearColor.CGColor;
-
-        objc_setAssociatedObject(
-            button,
-            kYTLGWatchActionSignatureKey,
-            signature,
-            OBJC_ASSOCIATION_COPY_NONATOMIC
-        );
-    }
-}
-
-static void
-YTLGUpdateWatchActionView(
+YTLGUpdateWatchActionGlass(
     YTSlimVideoDetailsActionView *actionView
 ) {
     if (!actionView ||
-        !actionView.window) {
+        !actionView.window ||
+        CGRectIsEmpty(actionView.bounds)) {
         return;
     }
 
@@ -3605,28 +3579,183 @@ YTLGUpdateWatchActionView(
         actionView.button;
 
     if (!button) {
-        button =
-            YTLGFirstButtonDescendant(
-                actionView
+        // Older/newer YouTube builds may expose the button only as _button.
+        id value =
+            YTLGWatchObjectIvar(
+                actionView,
+                "_button"
             );
+
+        if ([value isKindOfClass:UIButton.class]) {
+            button = (UIButton *)value;
+        }
     }
 
-    if (!button) return;
+    if (!button ||
+        button.hidden ||
+        button.alpha <= 0.01) {
+        return;
+    }
 
-    // Like, dislike, share, Super Thanks, More, etc. are icon actions.
-    YTLGApplyWatchNativeGlassButton(
-        button,
-        NO,
-        YES
+    UIVisualEffectView *glass =
+        YTLGWatchGlassForView(
+            actionView,
+            kYTLGWatchActionGlassKey,
+            NO,
+            @"YTLiquidGlass.WatchAction"
+        );
+
+    CGRect buttonFrame =
+        [button convertRect:button.bounds
+                     toView:actionView];
+
+    if (CGRectIsEmpty(buttonFrame)) {
+        buttonFrame = actionView.bounds;
+    }
+
+    // Compact native circular glass around each action glyph.
+    CGFloat side =
+        MAX(
+            40.0,
+            MIN(
+                46.0,
+                MAX(
+                    buttonFrame.size.width,
+                    buttonFrame.size.height
+                )
+            )
+        );
+
+    CGPoint center =
+        CGPointMake(
+            CGRectGetMidX(buttonFrame),
+            CGRectGetMidY(buttonFrame)
+        );
+
+    CGRect frame =
+        CGRectMake(
+            center.x - side * 0.5,
+            center.y - side * 0.5,
+            side,
+            side
+        );
+
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        side * 0.5;
+
+    YTLGClearLegacyControlBackground(
+        button
     );
 
-    actionView.opaque = NO;
-    actionView.backgroundColor =
-        UIColor.clearColor;
+    // Keep YouTube's icon/control above the material.
+    [actionView sendSubviewToBack:glass];
 }
 
 static void
-YTLGUpdateWatchOwnerView(
+YTLGUpdateWatchSubscribeGlass(
+    UIView *subscribeSwitch
+) {
+    if (!subscribeSwitch ||
+        !subscribeSwitch.window ||
+        subscribeSwitch.hidden ||
+        subscribeSwitch.alpha <= 0.01 ||
+        CGRectIsEmpty(subscribeSwitch.bounds)) {
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGWatchGlassForView(
+            subscribeSwitch,
+            kYTLGWatchSubscribeGlassKey,
+            YES,
+            @"YTLiquidGlass.WatchSubscribe"
+        );
+
+    glass.frame =
+        subscribeSwitch.bounds;
+
+    glass.layer.cornerRadius =
+        subscribeSwitch.bounds.size.height *
+        0.5;
+
+    YTLGClearLegacyControlBackground(
+        subscribeSwitch
+    );
+
+    // YTSubscribeSwitch uses a dedicated _backgroundImageView for its old
+    // opaque subscribe/unsubscribe artwork. Hide only that background image;
+    // the status label and interaction stay intact.
+    id backgroundImageView =
+        YTLGWatchObjectIvar(
+            subscribeSwitch,
+            "_backgroundImageView"
+        );
+
+    if ([backgroundImageView
+            isKindOfClass:UIImageView.class]) {
+        ((UIImageView *)backgroundImageView).hidden =
+            YES;
+    }
+
+    // Keep the title readable on dark/light glass.
+    id statusLabel =
+        YTLGWatchObjectIvar(
+            subscribeSwitch,
+            "_statusLabel"
+        );
+
+    if (statusLabel &&
+        [statusLabel
+            respondsToSelector:
+                @selector(setTextColor:)]) {
+
+        ((void (*)(id, SEL, UIColor *))objc_msgSend)(
+            statusLabel,
+            @selector(setTextColor:),
+            UIColor.labelColor
+        );
+    }
+
+    [subscribeSwitch sendSubviewToBack:glass];
+}
+
+static void
+YTLGUpdateWatchSecondaryControlGlass(
+    UIView *control,
+    NSString *identifier
+) {
+    if (!control ||
+        !control.window ||
+        control.hidden ||
+        control.alpha <= 0.01 ||
+        CGRectIsEmpty(control.bounds)) {
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGWatchGlassForView(
+            control,
+            kYTLGWatchSecondaryGlassKey,
+            NO,
+            identifier
+        );
+
+    glass.frame =
+        control.bounds;
+
+    glass.layer.cornerRadius =
+        control.bounds.size.height * 0.5;
+
+    YTLGClearLegacyControlBackground(
+        control
+    );
+
+    [control sendSubviewToBack:glass];
+}
+
+static void
+YTLGUpdateWatchOwnerGlass(
     YTSlimVideoOwnerView *owner
 ) {
     if (!owner ||
@@ -3634,56 +3763,48 @@ YTLGUpdateWatchOwnerView(
         return;
     }
 
-    // Subscribe is the primary call-to-action on the watch page.
-    for (UIButton *button
-            in YTLGButtonDescendants(
-                owner.subscribeSwitch)) {
+    UIView *subscribe =
+        owner.subscribeSwitch;
 
-        YTLGApplyWatchNativeGlassButton(
-            button,
-            YES,
-            NO
+    if (subscribe) {
+        YTLGUpdateWatchSubscribeGlass(
+            subscribe
         );
     }
 
-    // Join/Sponsor is secondary.
-    for (UIButton *button
-            in YTLGButtonDescendants(
-                owner.sponsorButton)) {
+    UIView *sponsor =
+        owner.sponsorButton;
 
-        YTLGApplyWatchNativeGlassButton(
-            button,
-            NO,
-            NO
+    if (sponsor) {
+        YTLGUpdateWatchSecondaryControlGlass(
+            sponsor,
+            @"YTLiquidGlass.WatchSponsor"
         );
     }
 
-    // Once subscribed, YouTube can expose bell/notification controls.
-    for (UIButton *button
-            in YTLGButtonDescendants(
-                owner.notificationToggleButton)) {
+    UIView *bell =
+        owner.notificationToggleButton;
 
-        YTLGApplyWatchNativeGlassButton(
-            button,
-            NO,
-            YES
+    if (bell) {
+        YTLGUpdateWatchSecondaryControlGlass(
+            bell,
+            @"YTLiquidGlass.WatchBell"
         );
     }
 
-    for (UIButton *button
-            in YTLGButtonDescendants(
-                owner.notificationMultiToggleButton)) {
+    UIView *multiBell =
+        owner.notificationMultiToggleButton;
 
-        YTLGApplyWatchNativeGlassButton(
-            button,
-            NO,
-            YES
+    if (multiBell) {
+        YTLGUpdateWatchSecondaryControlGlass(
+            multiBell,
+            @"YTLiquidGlass.WatchMultiBell"
         );
     }
 }
 
 static void
-YTLGRefreshWatchOwnerSoon(
+YTLGRefreshWatchOwnerGlassSoon(
     YTSlimVideoOwnerView *owner
 ) {
     if (!owner) return;
@@ -3692,7 +3813,9 @@ YTLGRefreshWatchOwnerSoon(
         dispatch_get_main_queue(),
         ^{
             if (owner.window) {
-                YTLGUpdateWatchOwnerView(owner);
+                YTLGUpdateWatchOwnerGlass(
+                    owner
+                );
             }
         }
     );
@@ -3705,14 +3828,14 @@ YTLGRefreshWatchOwnerSoon(
 - (void)layoutSubviews {
     %orig;
 
-    YTLGUpdateWatchActionView(self);
+    YTLGUpdateWatchActionGlass(self);
 }
 
 - (void)didMoveToWindow {
     %orig;
 
     if (self.window) {
-        YTLGUpdateWatchActionView(self);
+        YTLGUpdateWatchActionGlass(self);
     }
 }
 
@@ -3724,20 +3847,540 @@ YTLGRefreshWatchOwnerSoon(
 - (void)layoutSubviews {
     %orig;
 
-    YTLGUpdateWatchOwnerView(self);
+    YTLGUpdateWatchOwnerGlass(self);
 }
 
 - (void)didMoveToWindow {
     %orig;
 
     if (self.window) {
-        YTLGRefreshWatchOwnerSoon(self);
+        YTLGRefreshWatchOwnerGlassSoon(self);
     }
 }
 
 %end
 
 %end
+
+
+
+#pragma mark - Global normal-app Liquid Glass pills and subscription controls
+
+// This module intentionally targets YouTube's reusable normal-app controls
+// instead of hard-coding English labels such as "Create a channel" or
+// "View Channel". This lets localized builds and future labels benefit too.
+//
+// Guardrails:
+//   • no player / playback / Shorts / Reels UI
+//   • no tab bar / search / header controls that already have dedicated glass
+//   • no watch metadata controls that already have dedicated v2.2 handling
+//   • no action-sheet/dialog rows (native menu bridge owns those)
+
+static const void *kYTLGGenericPillGlassKey =
+    &kYTLGGenericPillGlassKey;
+
+static BOOL
+YTLGAncestorClassNameContains(
+    UIView *view,
+    NSArray<NSString *> *needles
+) {
+    UIView *cursor = view;
+
+    for (NSUInteger depth = 0;
+         cursor && depth < 32;
+         depth++, cursor = cursor.superview) {
+
+        NSString *name =
+            NSStringFromClass(cursor.class);
+
+        NSString *lower =
+            name.lowercaseString;
+
+        for (NSString *needle in needles) {
+            if ([lower containsString:
+                    needle.lowercaseString]) {
+                return YES;
+            }
+        }
+    }
+
+    UIResponder *responder = view;
+
+    for (NSUInteger depth = 0;
+         responder && depth < 32;
+         depth++, responder = responder.nextResponder) {
+
+        NSString *name =
+            NSStringFromClass(responder.class);
+
+        NSString *lower =
+            name.lowercaseString;
+
+        for (NSString *needle in needles) {
+            if ([lower containsString:
+                    needle.lowercaseString]) {
+                return YES;
+            }
+        }
+    }
+
+    return NO;
+}
+
+static BOOL
+YTLGShouldSkipGlobalNormalControl(
+    UIView *view
+) {
+    if (!view) return YES;
+
+    static NSArray<NSString *> *blockedNames;
+    static dispatch_once_t onceToken;
+
+    dispatch_once(&onceToken, ^{
+        blockedNames = @[
+            // Actual media/player UI.
+            @"player",
+            @"playback",
+            @"reel",
+            @"short",
+            @"fullscreen",
+            @"videooverlay",
+            @"inlineplayer",
+
+            // Dedicated glass modules already own these.
+            @"ytrightnavigationbuttons",
+            @"ytpivotbar",
+            @"ytsearch",
+            @"ytheaderview",
+            @"ytslimvideodetailsactionview",
+            @"ytslimvideoownerview",
+
+            // Menus/dialogs are handled by the native UIMenu bridge.
+            @"actionsheet",
+            @"goodialog",
+            @"alertcontroller"
+        ];
+    });
+
+    return YTLGAncestorClassNameContains(
+        view,
+        blockedNames
+    );
+}
+
+static NSString *
+YTLGVisibleButtonTitle(UIButton *button) {
+    if (!button) return nil;
+
+    NSString *title =
+        [button titleForState:UIControlStateNormal]
+        ?: button.currentTitle
+        ?: button.titleLabel.text;
+
+    return title.length > 0
+        ? title
+        : nil;
+}
+
+static BOOL
+YTLGLooksLikeNormalPillButton(
+    UIButton *button
+) {
+    if (!button ||
+        !button.window ||
+        button.hidden ||
+        button.alpha <= 0.01 ||
+        !button.enabled ||
+        CGRectIsEmpty(button.bounds)) {
+        return NO;
+    }
+
+    if (YTLGShouldSkipGlobalNormalControl(
+            button)) {
+        return NO;
+    }
+
+    NSString *title =
+        YTLGVisibleButtonTitle(button);
+
+    if (title.length == 0) {
+        return NO;
+    }
+
+    CGSize size = button.bounds.size;
+
+    // Broad enough for:
+    //   Accounts / Create a channel / Get Premium
+    //   View Channel / YouTube Music / Join
+    //   Home/Search/Watch topic/filter chips
+    // but narrow enough to skip giant card/touch targets.
+    if (size.height < 26.0 ||
+        size.height > 58.0 ||
+        size.width < 44.0 ||
+        size.width > 360.0) {
+        return NO;
+    }
+
+    return YES;
+}
+
+static UIVisualEffect *
+YTLGGenericPillEffect(
+    BOOL emphasized
+) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass respondsToSelector:
+                @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+
+            if (emphasized) {
+                effect.tintColor =
+                    [UIColor.labelColor
+                        colorWithAlphaComponent:0.14];
+            }
+
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static UIVisualEffectView *
+YTLGGenericPillGlassView(
+    UIButton *button
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            button,
+            kYTLGGenericPillGlassKey
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGGenericPillEffect(
+                        button.selected
+                    )];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.GenericPill";
+
+        [button insertSubview:glass
+                     atIndex:0];
+
+        objc_setAssociatedObject(
+            button,
+            kYTLGGenericPillGlassKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    return glass;
+}
+
+static void
+YTLGRemoveGenericPillGlass(
+    UIButton *button
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            button,
+            kYTLGGenericPillGlassKey
+        );
+
+    glass.hidden = YES;
+}
+
+static void
+YTLGUpdateGenericPillGlass(
+    YTLightweightQTMButton *button
+) {
+    if (!YTLGLooksLikeNormalPillButton(
+            button)) {
+
+        YTLGRemoveGenericPillGlass(
+            button
+        );
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGGenericPillGlassView(
+            button
+        );
+
+    glass.hidden = NO;
+    glass.frame = button.bounds;
+    glass.layer.cornerRadius =
+        button.bounds.size.height * 0.5;
+
+    // Refresh material emphasis when a filter/chip becomes selected.
+    BOOL emphasized =
+        button.selected ||
+        button.highlighted;
+
+    UIGlassEffect *effect = nil;
+
+    if (@available(iOS 26.0, *)) {
+        if ([glass.effect
+                isKindOfClass:
+                    NSClassFromString(@"UIGlassEffect")]) {
+
+            effect =
+                (UIGlassEffect *)glass.effect;
+
+            effect.tintColor =
+                emphasized
+                    ? [UIColor.labelColor
+                        colorWithAlphaComponent:0.14]
+                    : nil;
+        }
+    }
+
+    // YouTube's QTM controls repaint enabledBackgroundColor during state/layout
+    // updates. Clear those legacy fills each pass so they cannot cover glass.
+    button.opaque = NO;
+    button.backgroundColor =
+        UIColor.clearColor;
+    button.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    if ([button respondsToSelector:
+            @selector(setEnabledBackgroundColor:)]) {
+        button.enabledBackgroundColor =
+            UIColor.clearColor;
+    }
+
+    if ([button respondsToSelector:
+            @selector(setDisabledBackgroundColorLight:)]) {
+        button.disabledBackgroundColorLight =
+            UIColor.clearColor;
+    }
+
+    if ([button respondsToSelector:
+            @selector(setDisabledBackgroundColorDark:)]) {
+        button.disabledBackgroundColorDark =
+            UIColor.clearColor;
+    }
+
+    [button sendSubviewToBack:glass];
+}
+
+static void
+YTLGRefreshGenericPillSoon(
+    YTLightweightQTMButton *button
+) {
+    if (!button) return;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            if (button.window) {
+                YTLGUpdateGenericPillGlass(
+                    button
+                );
+            }
+        }
+    );
+}
+
+%group YTLiquidGlassGenericPills
+
+%hook YTLightweightQTMButton
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateGenericPillGlass(self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        YTLGRefreshGenericPillSoon(self);
+    }
+}
+
+- (void)setSelected:(BOOL)selected {
+    %orig(selected);
+
+    YTLGRefreshGenericPillSoon(self);
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig(highlighted);
+
+    YTLGRefreshGenericPillSoon(self);
+}
+
+- (void)setEnabled:(BOOL)enabled {
+    %orig(enabled);
+
+    YTLGRefreshGenericPillSoon(self);
+}
+
+%end
+
+%end
+
+
+#pragma mark - Global Subscribe / notification glass
+
+static BOOL
+YTLGShouldGlassSubscribeControl(
+    UIView *control
+) {
+    if (!control ||
+        !control.window ||
+        control.hidden ||
+        control.alpha <= 0.01 ||
+        CGRectIsEmpty(control.bounds)) {
+        return NO;
+    }
+
+    // Subscribe controls are normal content chrome, but never touch them when
+    // they somehow appear inside a player/Shorts presentation.
+    static NSArray<NSString *> *mediaNames;
+    static dispatch_once_t onceToken;
+
+    dispatch_once(&onceToken, ^{
+        mediaNames = @[
+            @"player",
+            @"playback",
+            @"reel",
+            @"short",
+            @"fullscreen",
+            @"videooverlay",
+            @"inlineplayer"
+        ];
+    });
+
+    return !YTLGAncestorClassNameContains(
+        control,
+        mediaNames
+    );
+}
+
+%group YTLiquidGlassGlobalSubscriptions
+
+%hook YTSubscribeSwitch
+
+- (void)layoutSubviews {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self)) {
+        // Reuse v2.2's direct UIGlassEffect implementation.
+        YTLGUpdateWatchSubscribeGlass(self);
+    }
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self)) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGUpdateWatchSubscribeGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+%end
+
+
+%hook YTNotificationPreferenceToggleButton
+
+- (void)layoutSubviews {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self) &&
+        !YTLGShouldSkipGlobalNormalControl(self)) {
+
+        YTLGUpdateWatchSecondaryControlGlass(
+            self,
+            @"YTLiquidGlass.NotificationBell"
+        );
+    }
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self) &&
+        !YTLGShouldSkipGlobalNormalControl(self)) {
+
+        YTLGUpdateWatchSecondaryControlGlass(
+            self,
+            @"YTLiquidGlass.NotificationBell"
+        );
+    }
+}
+
+%end
+
+
+%hook YTNotificationMultiToggleButton
+
+- (void)layoutSubviews {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self) &&
+        !YTLGShouldSkipGlobalNormalControl(self)) {
+
+        YTLGUpdateWatchSecondaryControlGlass(
+            self,
+            @"YTLiquidGlass.MultiNotificationBell"
+        );
+    }
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (YTLGShouldGlassSubscribeControl(self) &&
+        !YTLGShouldSkipGlobalNormalControl(self)) {
+
+        YTLGUpdateWatchSecondaryControlGlass(
+            self,
+            @"YTLiquidGlass.MultiNotificationBell"
+        );
+    }
+}
+
+%end
+
+%end
+
 
 %ctor {
     if (@available(iOS 26.0, *)) {
@@ -3792,13 +4435,25 @@ YTLGRefreshWatchOwnerSoon(
             %init(YTLiquidGlassChannelActions);
         }
 
-        if ((NSClassFromString(@"YTSlimVideoDetailsActionView") ||
-             NSClassFromString(@"YTSlimVideoOwnerView")) &&
-            [UIButtonConfiguration
-                respondsToSelector:
-                    @selector(glassButtonConfiguration)]) {
+        if (NSClassFromString(@"UIGlassEffect") &&
+            (NSClassFromString(@"YTSlimVideoDetailsActionView") ||
+             NSClassFromString(@"YTSlimVideoOwnerView"))) {
 
             %init(YTLiquidGlassWatchMetadataActions);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTLightweightQTMButton")) {
+
+            %init(YTLiquidGlassGenericPills);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            (NSClassFromString(@"YTSubscribeSwitch") ||
+             NSClassFromString(@"YTNotificationPreferenceToggleButton") ||
+             NSClassFromString(@"YTNotificationMultiToggleButton"))) {
+
+            %init(YTLiquidGlassGlobalSubscriptions);
         }
     }
 }
