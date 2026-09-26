@@ -1,4 +1,4 @@
-// YTLiquidGlass FINAL STABLE
+// YTLiquidGlass FINAL STABLE + YTKACE tab icon compatibility
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -365,6 +365,73 @@ YTLGItemUsesOriginalArtwork(YTPivotBarItemView *item) {
     return NO;
 }
 
+static BOOL
+YTLGIsYTKACETab(
+    YTPivotBarItemView *item
+) {
+    NSString *identifier =
+        item.renderer.pivotIdentifier;
+
+    return
+        [identifier
+            caseInsensitiveCompare:@"FEYTKACE"]
+        == NSOrderedSame;
+}
+
+static UIImage *
+YTLGYTKACETabImage(
+    BOOL selected
+) {
+    UIImage *image =
+        [UIImage
+            systemImageNamed:
+                selected
+                    ? @"arrow.down.square.fill"
+                    : @"arrow.down.square"];
+
+    return [image
+        imageWithRenderingMode:
+            UIImageRenderingModeAlwaysTemplate];
+}
+
+static UIImage *
+YTLGCustomOverlayImageForItem(
+    YTPivotBarItemView *item
+) {
+    if (!item) {
+        return nil;
+    }
+
+    // YTKACE uses 0x59414345 for its main custom tab icon and
+    // 0x59414349 for extra-tab replacement icons.
+    for (NSInteger tagValue in
+            @[@(0x59414345),
+              @(0x59414349)]) {
+
+        UIView *candidate =
+            [item
+                viewWithTag:
+                    tagValue.integerValue];
+
+        if ([candidate
+                isKindOfClass:
+                    UIImageView.class]) {
+
+            UIImage *image =
+                ((UIImageView *)candidate).image;
+
+            if (image) {
+                return [image
+                    imageWithRenderingMode:
+                        UIImageRenderingModeAlwaysTemplate];
+            }
+        }
+    }
+
+    return nil;
+}
+
+
 static UIImage *
 YTLGNativeImage(UIImage *image, BOOL preserveOriginal) {
     if (![image isKindOfClass:UIImage.class]) {
@@ -436,21 +503,36 @@ static UIImage *
 YTLGNormalImageForItem(
     YTPivotBarItemView *item
 ) {
+    if (YTLGIsYTKACETab(item)) {
+        return YTLGYTKACETabImage(NO);
+    }
+
     UIButton *button = item.navigationButton;
 
-    if (![button isKindOfClass:UIButton.class]) {
-        return nil;
+    UIImage *image = nil;
+
+    if ([button isKindOfClass:UIButton.class]) {
+        image =
+            [button
+                imageForState:
+                    UIControlStateNormal];
+
+        if (!image) {
+            image = button.currentImage;
+        }
+
+        if (!image) {
+            image = button.imageView.image;
+        }
     }
 
-    UIImage *image =
-        [button imageForState:UIControlStateNormal];
-
+    // YTKACE and similar tweaks can draw a custom tab icon as an overlay
+    // UIImageView instead of putting it on navigationButton.
     if (!image) {
-        image = button.currentImage;
-    }
-
-    if (!image) {
-        image = button.imageView.image;
+        image =
+            YTLGCustomOverlayImageForItem(
+                item
+            );
     }
 
     return YTLGNativeImage(
@@ -464,19 +546,33 @@ YTLGSelectedImageForItem(
     YTPivotBarItemView *item,
     UIImage *fallback
 ) {
-    UIButton *button = item.navigationButton;
-
-    if (![button isKindOfClass:UIButton.class]) {
-        return fallback;
+    if (YTLGIsYTKACETab(item)) {
+        return YTLGYTKACETabImage(YES);
     }
 
-    UIImage *image =
-        [button imageForState:UIControlStateSelected];
+    UIButton *button = item.navigationButton;
+
+    UIImage *image = nil;
+
+    if ([button isKindOfClass:UIButton.class]) {
+        image =
+            [button
+                imageForState:
+                    UIControlStateSelected];
+
+        if (!image) {
+            image =
+                [button
+                    imageForState:
+                        UIControlStateHighlighted];
+        }
+    }
 
     if (!image) {
         image =
-            [button imageForState:
-                UIControlStateHighlighted];
+            YTLGCustomOverlayImageForItem(
+                item
+            );
     }
 
     if (!image) {
