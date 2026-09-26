@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.3-DIAGNOSTIC — Runtime watch-row inspector
+// YTLiquidGlass v3.4 — AsyncDisplayKit watch-row Liquid Glass
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -107,6 +107,11 @@
 @end
 
 @interface YTSlimVideoScrollableActionBarCell : UICollectionViewCell
+@end
+
+// Current YouTube watch-page action controls are rendered through
+// AsyncDisplayKit/Texture-backed display views.
+@interface _ASDisplayView : UIView
 @end
 
 @interface YTSlimVideoOwnerView : UIView
@@ -3927,6 +3932,450 @@ YTLGShouldSkipGlobalNormalControl(
     );
 }
 
+
+#pragma mark - AsyncDisplayKit / Texture watch-row Liquid Glass
+
+// v3.4 final targeted path:
+// Current YouTube/YTKACE identifies watch-page action controls on _ASDisplayView
+// instances with identifiers such as id_video_like_button,
+// id_video_dislike_button and id_video_share_button. We only touch those
+// watch-action identifiers (plus tightly scoped Subscribe labels/identifiers),
+// never every _ASDisplayView in the app.
+
+static const void *kYTLGASActionGlassKey =
+    &kYTLGASActionGlassKey;
+
+static const void *kYTLGASSubscribeGlassKey =
+    &kYTLGASSubscribeGlassKey;
+
+static NSString *
+YTLGASNormalizedToken(
+    UIView *view
+) {
+    if (!view) return @"";
+
+    NSString *className =
+        NSStringFromClass(view.class)
+            ?: @"";
+
+    NSString *identifier =
+        view.accessibilityIdentifier
+            ?: @"";
+
+    NSString *label =
+        view.accessibilityLabel
+            ?: @"";
+
+    return [[NSString
+        stringWithFormat:
+            @"%@ %@ %@",
+            className,
+            identifier,
+            label]
+        lowercaseString];
+}
+
+static BOOL
+YTLGASInsideMediaOverlay(
+    UIView *view
+) {
+    UIView *cursor = view;
+
+    for (NSUInteger depth = 0;
+         cursor && depth < 20;
+         depth++, cursor = cursor.superview) {
+
+        NSString *token =
+            YTLGASNormalizedToken(
+                cursor
+            );
+
+        // Do NOT glass anything inside an actual player/Shorts overlay.
+        if ([token containsString:@"reel_overlay"] ||
+            [token containsString:@"shortsplayer"] ||
+            [token containsString:@"shorts_player"] ||
+            [token containsString:@"fullscreen"] ||
+            [token containsString:@"videooverlay"] ||
+            [token containsString:@"video_overlay"] ||
+            [token containsString:@"controls_overlay"] ||
+            [token containsString:@"playeroverlay"]) {
+
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL
+YTLGASIsWatchAction(
+    UIView *view
+) {
+    if (!view ||
+        !view.window ||
+        view.hidden ||
+        view.alpha <= 0.01 ||
+        CGRectIsEmpty(view.bounds) ||
+        YTLGASInsideMediaOverlay(view)) {
+        return NO;
+    }
+
+    NSString *token =
+        YTLGASNormalizedToken(
+            view
+        );
+
+    // Exact current identifiers used by YouTube/YTKACE.
+    if ([token containsString:@"id_video_like_button"] ||
+        [token containsString:@"id_video_dislike_button"] ||
+        [token containsString:@"id_video_share_button"]) {
+        return YES;
+    }
+
+    // Other watch action-bar items vary by experiment/version.
+    NSArray<NSString *> *actionTokens = @[
+        @"super_thanks",
+        @"super thanks",
+        @"thanks",
+        @"hype",
+        @"clip",
+        @"remix",
+        @"offline",
+        @"download",
+        @"add_to",
+        @"save",
+        @"more actions",
+        @"more_action",
+        @"watch_more"
+    ];
+
+    for (NSString *part in actionTokens) {
+        if ([token containsString:part]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL
+YTLGASIsSubscribeControl(
+    UIView *view
+) {
+    if (!view ||
+        !view.window ||
+        view.hidden ||
+        view.alpha <= 0.01 ||
+        CGRectIsEmpty(view.bounds) ||
+        YTLGASInsideMediaOverlay(view)) {
+        return NO;
+    }
+
+    CGFloat width =
+        CGRectGetWidth(view.bounds);
+
+    CGFloat height =
+        CGRectGetHeight(view.bounds);
+
+    // Prevent navigation tabs and large containers from being mistaken for CTA.
+    if (height < 28.0 ||
+        height > 68.0 ||
+        width < 64.0 ||
+        width > 240.0) {
+        return NO;
+    }
+
+    NSString *identifier =
+        (view.accessibilityIdentifier ?: @"")
+            .lowercaseString;
+
+    NSString *label =
+        (view.accessibilityLabel ?: @"")
+            .lowercaseString;
+
+    NSString *className =
+        NSStringFromClass(view.class)
+            .lowercaseString;
+
+    // Explicitly reject the navigation destination "Subscriptions".
+    if ([label isEqualToString:@"subscriptions"] ||
+        [identifier containsString:@"subscriptions"] ||
+        [className containsString:@"pivot"] ||
+        [className containsString:@"tabbar"] ||
+        [className containsString:@"tabbutton"]) {
+        return NO;
+    }
+
+    if ([label isEqualToString:@"subscribe"] ||
+        [label isEqualToString:@"subscribed"]) {
+        return YES;
+    }
+
+    if ([identifier containsString:@"subscribe_button"] ||
+        [identifier containsString:@"subscription_button"] ||
+        ([identifier containsString:@"subscribe"] &&
+         ![identifier containsString:@"subscriptions"])) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static UIVisualEffectView *
+YTLGASGlassView(
+    UIView *owner,
+    const void *key,
+    BOOL prominent,
+    NSString *identifier
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            owner,
+            key
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGWatchRegularGlassEffect(
+                        prominent
+                    )];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+        glass.accessibilityIdentifier =
+            identifier;
+
+        objc_setAssociatedObject(
+            owner,
+            key,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    // Texture/AsyncDisplayKit can rebuild subviews. Reinsert our material if
+    // its owner removed it during a node update.
+    if (glass.superview != owner) {
+        [glass removeFromSuperview];
+        [owner insertSubview:glass
+                     atIndex:0];
+    } else {
+        [owner sendSubviewToBack:glass];
+    }
+
+    return glass;
+}
+
+static void
+YTLGASClearLegacyBackground(
+    UIView *view
+) {
+    if (!view) return;
+
+    view.opaque = NO;
+    view.backgroundColor =
+        UIColor.clearColor;
+    view.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+}
+
+static void
+YTLGApplyASWatchActionGlass(
+    UIView *view
+) {
+    if (!YTLGASIsWatchAction(view)) {
+        UIVisualEffectView *existing =
+            objc_getAssociatedObject(
+                view,
+                kYTLGASActionGlassKey
+            );
+
+        if (existing) {
+            existing.hidden = YES;
+        }
+
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGASGlassView(
+            view,
+            kYTLGASActionGlassKey,
+            NO,
+            @"YTLiquidGlass.ASWatchAction"
+        );
+
+    glass.hidden = NO;
+
+    CGRect bounds =
+        view.bounds;
+
+    CGFloat width =
+        CGRectGetWidth(bounds);
+
+    CGFloat height =
+        CGRectGetHeight(bounds);
+
+    if (width > height * 1.35) {
+        // A labeled/count-bearing action uses a capsule.
+        CGRect frame =
+            CGRectInset(
+                bounds,
+                1.0,
+                2.0
+            );
+
+        glass.frame = frame;
+        glass.layer.cornerRadius =
+            CGRectGetHeight(frame) * 0.5;
+    } else {
+        // Icon actions use a compact circular native glass surface.
+        CGFloat side =
+            MIN(
+                44.0,
+                MAX(
+                    38.0,
+                    MIN(width, height)
+                )
+            );
+
+        glass.frame =
+            CGRectMake(
+                CGRectGetMidX(bounds) - side * 0.5,
+                CGRectGetMidY(bounds) - side * 0.5,
+                side,
+                side
+            );
+
+        glass.layer.cornerRadius =
+            side * 0.5;
+    }
+
+    YTLGASClearLegacyBackground(
+        view
+    );
+
+    [view sendSubviewToBack:glass];
+}
+
+static void
+YTLGApplyASSubscribeGlass(
+    UIView *view
+) {
+    if (!YTLGASIsSubscribeControl(view)) {
+        UIVisualEffectView *existing =
+            objc_getAssociatedObject(
+                view,
+                kYTLGASSubscribeGlassKey
+            );
+
+        if (existing) {
+            existing.hidden = YES;
+        }
+
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGASGlassView(
+            view,
+            kYTLGASSubscribeGlassKey,
+            YES,
+            @"YTLiquidGlass.ASSubscribe"
+        );
+
+    glass.hidden = NO;
+    glass.frame =
+        view.bounds;
+    glass.layer.cornerRadius =
+        CGRectGetHeight(view.bounds) * 0.5;
+
+    YTLGASClearLegacyBackground(
+        view
+    );
+
+    [view sendSubviewToBack:glass];
+}
+
+static void
+YTLGRefreshASDisplayGlass(
+    UIView *view
+) {
+    if (!view ||
+        !view.window) {
+        return;
+    }
+
+    YTLGApplyASWatchActionGlass(
+        view
+    );
+
+    YTLGApplyASSubscribeGlass(
+        view
+    );
+}
+
+%group YTLiquidGlassAsyncDisplayWatchControls
+
+%hook _ASDisplayView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGRefreshASDisplayGlass(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGRefreshASDisplayGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+- (void)setAccessibilityIdentifier:(NSString *)identifier {
+    %orig(identifier);
+
+    if (self.window) {
+        YTLGRefreshASDisplayGlass(
+            self
+        );
+    }
+}
+
+- (void)setAccessibilityLabel:(NSString *)label {
+    %orig(label);
+
+    if (self.window) {
+        YTLGRefreshASDisplayGlass(
+            self
+        );
+    }
+}
+
+%end
+
+%end
+
+
 #pragma mark - Global Subscribe / notification glass
 
 static BOOL
@@ -4061,634 +4510,8 @@ YTLGShouldGlassSubscribeControl(
 %end
 
 
-
-#pragma mark - TEMPORARY watch-row runtime diagnostic
-
-// This module is diagnostic-only. It does not alter YouTube actions.
-// When a likely Subscribe/Like/Dislike/Share/Thanks/More control appears,
-// it draws a red outline over the visible runtime view and shows the class
-// ancestry in a small overlay panel. This lets us identify the 2026 renderer
-// path before attempting another Liquid Glass implementation.
-
-static const NSInteger kYTLGDiagnosticOverlayTag = 0x594C4744;
-static const void *kYTLGDiagnosticPendingKey =
-    &kYTLGDiagnosticPendingKey;
-
-static BOOL
-YTLGDiagnosticHasBlockedAncestor(
-    UIView *view
-) {
-    static NSArray<NSString *> *blocked;
-    static dispatch_once_t onceToken;
-
-    dispatch_once(&onceToken, ^{
-        blocked = @[
-            @"player",
-            @"playback",
-            @"reel",
-            @"shorts",
-            @"fullscreen",
-            @"videooverlay",
-            @"inlineplayer"
-        ];
-    });
-
-    UIView *cursor = view;
-
-    for (NSUInteger depth = 0;
-         cursor && depth < 24;
-         depth++, cursor = cursor.superview) {
-
-        NSString *name =
-            NSStringFromClass(cursor.class)
-                .lowercaseString;
-
-        for (NSString *needle in blocked) {
-            if ([name containsString:needle]) {
-                return YES;
-            }
-        }
-    }
-
-    return NO;
-}
-
-static NSString *
-YTLGDiagnosticVisibleText(
-    UIView *view
-) {
-    if (!view) {
-        return @"";
-    }
-
-    NSMutableArray<NSString *> *parts =
-        [NSMutableArray array];
-
-    NSString *a11y =
-        view.accessibilityLabel;
-
-    if (a11y.length > 0) {
-        [parts addObject:a11y];
-    }
-
-    NSString *identifier =
-        view.accessibilityIdentifier;
-
-    if (identifier.length > 0) {
-        [parts addObject:identifier];
-    }
-
-    if ([view isKindOfClass:UIButton.class]) {
-        UIButton *button =
-            (UIButton *)view;
-
-        NSString *title =
-            [button titleForState:UIControlStateNormal]
-            ?: button.currentTitle
-            ?: button.titleLabel.text;
-
-        if (title.length > 0) {
-            [parts addObject:title];
-        }
-    }
-
-    if ([view isKindOfClass:UILabel.class]) {
-        UILabel *label =
-            (UILabel *)view;
-
-        if (label.text.length > 0) {
-            [parts addObject:label.text];
-        }
-    }
-
-    return [parts
-        componentsJoinedByString:@" | "];
-}
-
-static NSString *
-YTLGDiagnosticSemanticForView(
-    UIView *view
-) {
-    if (!view ||
-        view.hidden ||
-        view.alpha <= 0.01 ||
-        CGRectIsEmpty(view.bounds)) {
-        return nil;
-    }
-
-    NSString *className =
-        NSStringFromClass(view.class);
-
-    NSString *lowerClass =
-        className.lowercaseString;
-
-    NSString *text =
-        YTLGDiagnosticVisibleText(view);
-
-    NSString *lowerText =
-        text.lowercaseString;
-
-    NSArray<NSString *> *terms = @[
-        @"subscribe",
-        @"subscribed",
-        @"dislike",
-        @"like",
-        @"share",
-        @"thanks",
-        @"more"
-    ];
-
-    BOOL controlLike =
-        [view isKindOfClass:UIControl.class] ||
-        view.isAccessibilityElement ||
-        [lowerClass containsString:@"button"] ||
-        [lowerClass containsString:@"action"];
-
-    if (controlLike &&
-        view.bounds.size.height <= 100.0 &&
-        view.bounds.size.width <= 360.0) {
-
-        for (NSString *term in terms) {
-            if ([lowerText containsString:term]) {
-                return term.uppercaseString;
-            }
-        }
-    }
-
-    // Also include the YouTube classes that are supposed to own this row,
-    // even if they have no accessibility text.
-    NSArray<NSString *> *classTerms = @[
-        @"slimvideodetailsaction",
-        @"slimvideoscrollableactionbar",
-        @"slimvideoscrollabledetailsactions",
-        @"slimvideodetailsactions",
-        @"slimvideoowner",
-        @"slimmetadata"
-    ];
-
-    for (NSString *term in classTerms) {
-        if ([lowerClass containsString:term]) {
-            return @"YT-ROW";
-        }
-    }
-
-    return nil;
-}
-
-static NSString *
-YTLGDiagnosticClassChain(
-    UIView *view
-) {
-    if (!view) {
-        return @"";
-    }
-
-    NSMutableArray<NSString *> *names =
-        [NSMutableArray array];
-
-    UIView *cursor = view;
-
-    for (NSUInteger depth = 0;
-         cursor && depth < 6;
-         depth++, cursor = cursor.superview) {
-
-        [names addObject:
-            NSStringFromClass(cursor.class)];
-    }
-
-    return [names
-        componentsJoinedByString:@" ← "];
-}
-
-static UIView *
-YTLGDiagnosticOverlayForWindow(
-    UIWindow *window
-) {
-    UIView *overlay =
-        [window viewWithTag:
-            kYTLGDiagnosticOverlayTag];
-
-    if (!overlay) {
-        overlay =
-            [[UIView alloc]
-                initWithFrame:window.bounds];
-
-        overlay.tag =
-            kYTLGDiagnosticOverlayTag;
-
-        overlay.userInteractionEnabled =
-            NO;
-
-        overlay.backgroundColor =
-            UIColor.clearColor;
-
-        overlay.autoresizingMask =
-            UIViewAutoresizingFlexibleWidth |
-            UIViewAutoresizingFlexibleHeight;
-
-        overlay.accessibilityIdentifier =
-            @"YTLiquidGlass.Diagnostics";
-
-        [window addSubview:overlay];
-    }
-
-    overlay.frame =
-        window.bounds;
-
-    [window bringSubviewToFront:overlay];
-
-    return overlay;
-}
-
-static void
-YTLGDiagnosticAddOutline(
-    UIView *overlay,
-    UIView *target,
-    NSString *semantic,
-    NSUInteger index
-) {
-    if (!overlay ||
-        !target ||
-        !target.window) {
-        return;
-    }
-
-    CGRect frame =
-        [target convertRect:target.bounds
-                     toView:overlay];
-
-    if (CGRectIsEmpty(frame) ||
-        !CGRectIntersectsRect(
-            overlay.bounds,
-            frame)) {
-        return;
-    }
-
-    UIView *box =
-        [[UIView alloc]
-            initWithFrame:frame];
-
-    box.userInteractionEnabled =
-        NO;
-
-    box.backgroundColor =
-        UIColor.clearColor;
-
-    box.layer.borderWidth =
-        1.5;
-
-    box.layer.borderColor =
-        UIColor.systemRedColor.CGColor;
-
-    box.layer.cornerRadius =
-        MIN(
-            10.0,
-            frame.size.height * 0.25
-        );
-
-    [overlay addSubview:box];
-
-    NSString *className =
-        NSStringFromClass(target.class);
-
-    NSString *labelText =
-        [NSString stringWithFormat:
-            @"%lu %@ · %@",
-            (unsigned long)(index + 1),
-            semantic,
-            className];
-
-    UILabel *label =
-        [[UILabel alloc]
-            initWithFrame:CGRectZero];
-
-    label.userInteractionEnabled =
-        NO;
-
-    label.font =
-        [UIFont monospacedSystemFontOfSize:8.0
-                                   weight:UIFontWeightSemibold];
-
-    label.textColor =
-        UIColor.whiteColor;
-
-    label.backgroundColor =
-        [UIColor.blackColor
-            colorWithAlphaComponent:0.82];
-
-    label.text =
-        labelText;
-
-    label.numberOfLines = 1;
-
-    [label sizeToFit];
-
-    CGFloat width =
-        MIN(
-            overlay.bounds.size.width - 12.0,
-            label.bounds.size.width + 8.0
-        );
-
-    CGFloat y =
-        MAX(
-            2.0,
-            CGRectGetMinY(frame) - 15.0
-        );
-
-    label.frame =
-        CGRectMake(
-            MAX(
-                4.0,
-                MIN(
-                    CGRectGetMinX(frame),
-                    overlay.bounds.size.width -
-                    width - 4.0
-                )
-            ),
-            y,
-            width,
-            14.0
-        );
-
-    label.layer.cornerRadius =
-        3.0;
-
-    label.layer.masksToBounds =
-        YES;
-
-    [overlay addSubview:label];
-}
-
-static void
-YTLGDiagnosticScanWindow(
-    UIWindow *window
-) {
-    if (!window ||
-        window.hidden ||
-        window.alpha <= 0.01 ||
-        window.windowLevel != UIWindowLevelNormal) {
-        return;
-    }
-
-    UIView *overlay =
-        YTLGDiagnosticOverlayForWindow(
-            window
-        );
-
-    for (UIView *subview
-            in [overlay.subviews copy]) {
-        [subview removeFromSuperview];
-    }
-
-    NSMutableArray<UIView *> *stack =
-        [NSMutableArray
-            arrayWithObject:window];
-
-    NSMutableArray<UIView *> *matches =
-        [NSMutableArray array];
-
-    NSMutableArray<NSString *> *semantics =
-        [NSMutableArray array];
-
-    while (stack.count > 0 &&
-           matches.count < 18) {
-
-        UIView *candidate =
-            stack.lastObject;
-
-        [stack removeLastObject];
-
-        if (candidate == overlay ||
-            [candidate.accessibilityIdentifier
-                hasPrefix:@"YTLiquidGlass.Diagnostics"]) {
-            continue;
-        }
-
-        if (candidate != window) {
-            NSString *semantic =
-                YTLGDiagnosticSemanticForView(
-                    candidate
-                );
-
-            if (semantic &&
-                !YTLGDiagnosticHasBlockedAncestor(
-                    candidate)) {
-
-                [matches addObject:candidate];
-                [semantics addObject:semantic];
-            }
-        }
-
-        for (UIView *subview
-                in candidate.subviews) {
-            [stack addObject:subview];
-        }
-    }
-
-    NSMutableArray<NSString *> *lines =
-        [NSMutableArray array];
-
-    NSUInteger count =
-        MIN(
-            matches.count,
-            semantics.count
-        );
-
-    for (NSUInteger i = 0;
-         i < count;
-         i++) {
-
-        UIView *target =
-            matches[i];
-
-        NSString *semantic =
-            semantics[i];
-
-        YTLGDiagnosticAddOutline(
-            overlay,
-            target,
-            semantic,
-            i
-        );
-
-        NSString *chain =
-            YTLGDiagnosticClassChain(
-                target
-            );
-
-        [lines addObject:
-            [NSString stringWithFormat:
-                @"%lu %@: %@",
-                (unsigned long)(i + 1),
-                semantic,
-                chain]];
-    }
-
-    UILabel *panel =
-        [[UILabel alloc]
-            initWithFrame:CGRectZero];
-
-    panel.userInteractionEnabled =
-        NO;
-
-    panel.numberOfLines = 0;
-
-    panel.font =
-        [UIFont monospacedSystemFontOfSize:7.0
-                                   weight:UIFontWeightRegular];
-
-    panel.textColor =
-        UIColor.whiteColor;
-
-    panel.backgroundColor =
-        [UIColor.blackColor
-            colorWithAlphaComponent:0.78];
-
-    NSString *body =
-        lines.count > 0
-            ? [lines
-                componentsJoinedByString:@"\n"]
-            : @"No matching watch-row runtime views detected yet.";
-
-    panel.text =
-        [NSString stringWithFormat:
-            @"YTLiquidGlass WATCH DIAGNOSTIC (%lu)\n%@",
-            (unsigned long)lines.count,
-            body];
-
-    CGFloat panelWidth =
-        MIN(
-            overlay.bounds.size.width - 16.0,
-            600.0
-        );
-
-    CGSize fit =
-        [panel sizeThatFits:
-            CGSizeMake(
-                panelWidth - 12.0,
-                220.0
-            )];
-
-    CGFloat panelHeight =
-        MIN(
-            220.0,
-            MAX(
-                36.0,
-                fit.height + 10.0
-            )
-        );
-
-    panel.frame =
-        CGRectMake(
-            8.0,
-            overlay.bounds.size.height -
-            panelHeight - 8.0,
-            panelWidth,
-            panelHeight
-        );
-
-    panel.layer.cornerRadius =
-        8.0;
-
-    panel.layer.masksToBounds =
-        YES;
-
-    [overlay addSubview:panel];
-
-    [window bringSubviewToFront:overlay];
-}
-
-static void
-YTLGDiagnosticScheduleWindowScan(
-    UIWindow *window
-) {
-    if (!window) {
-        return;
-    }
-
-    NSNumber *pending =
-        objc_getAssociatedObject(
-            window,
-            kYTLGDiagnosticPendingKey
-        );
-
-    if (pending.boolValue) {
-        return;
-    }
-
-    objc_setAssociatedObject(
-        window,
-        kYTLGDiagnosticPendingKey,
-        @YES,
-        OBJC_ASSOCIATION_RETAIN_NONATOMIC
-    );
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(0.35 * NSEC_PER_SEC)
-        ),
-        dispatch_get_main_queue(),
-        ^{
-            objc_setAssociatedObject(
-                window,
-                kYTLGDiagnosticPendingKey,
-                @NO,
-                OBJC_ASSOCIATION_RETAIN_NONATOMIC
-            );
-
-            if (window &&
-                !window.hidden) {
-
-                YTLGDiagnosticScanWindow(
-                    window
-                );
-            }
-        }
-    );
-}
-
-%group YTLiquidGlassWatchDiagnostic
-
-%hook UICollectionViewCell
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (self.window) {
-        YTLGDiagnosticScheduleWindowScan(
-            self.window
-        );
-    }
-}
-
-%end
-
-
-%hook UIViewController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
-
-    UIWindow *window =
-        self.view.window;
-
-    if (window) {
-        YTLGDiagnosticScheduleWindowScan(
-            window
-        );
-    }
-}
-
-%end
-
-%end
-
-
 %ctor {
     if (@available(iOS 26.0, *)) {
-        %init(YTLiquidGlassWatchDiagnostic);
-
         if (NSClassFromString(@"YTPivotBarView") &&
             NSClassFromString(@"YTPivotBarItemView") &&
             NSClassFromString(@"YTPivotBarViewController")) {
@@ -4743,6 +4566,12 @@ YTLGDiagnosticScheduleWindowScan(
             NSClassFromString(@"YTSlimVideoScrollableActionBarCell")) {
 
             %init(YTLiquidGlassCurrentWatchActionBar);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"_ASDisplayView")) {
+
+            %init(YTLiquidGlassAsyncDisplayWatchControls);
         }
 
         if (NSClassFromString(@"UIGlassEffect") &&
