@@ -2,9 +2,17 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-// Minimal declarations only. We deliberately do not replace YouTube/YTLite's
-// tab model or controller; YTLite remains the source of truth for tab order,
-// visibility, custom tabs, and selection.
+// YTLiquidGlass v0.2
+//
+// Visual-only integration for YouTube/YTLite's existing pivot bar.
+// YTLite/YouTube remain the source of truth for:
+//   - active tabs
+//   - tab order
+//   - custom tabs
+//   - selection
+//   - navigation/actions
+//
+// This tweak only supplies the floating Liquid Glass presentation.
 
 @interface YTIPivotBarItemRenderer : NSObject
 @property(nonatomic, copy, readonly) NSString *pivotIdentifier;
@@ -25,148 +33,473 @@
 @property(nonatomic, weak, readonly) YTPivotBarViewController *delegate;
 @end
 
-static const void *kYTLGBarGlassKey = &kYTLGBarGlassKey;
-static const void *kYTLGItemGlassKey = &kYTLGItemGlassKey;
+static const void *kYTLGCompositorKey = &kYTLGCompositorKey;
+static const void *kYTLGBackgroundKey = &kYTLGBackgroundKey;
+static const void *kYTLGLensKey = &kYTLGLensKey;
 
-// Keep the tweak loadable with the existing iOS 15 deployment target.
-// iOS 26-only enum types and constants are referenced only inside the
-// availability-guarded block so Clang does not emit unguarded-availability
-// errors when building against the iOS 27 SDK.
-static UIVisualEffect *YTLGGlassEffect(BOOL clearStyle) {
+#pragma mark - Liquid Glass effects
+
+// Keep the dylib loadable with the existing iOS 15 deployment target.
+// iOS 26+ symbols only appear inside availability-guarded blocks.
+
+static UIVisualEffect *YTLGGlassEffect(BOOL clearStyle, BOOL selectedLens) {
     if (@available(iOS 26.0, *)) {
         Class glassClass = NSClassFromString(@"UIGlassEffect");
-        if (glassClass && [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+
+        if (glassClass &&
+            [glassClass respondsToSelector:@selector(effectWithStyle:)]) {
+
             UIGlassEffectStyle style =
-                clearStyle ? UIGlassEffectStyleClear : UIGlassEffectStyleRegular;
-            return [UIGlassEffect effectWithStyle:style];
+                clearStyle ? UIGlassEffectStyleClear
+                           : UIGlassEffectStyleRegular;
+
+            UIGlassEffect *effect = [UIGlassEffect effectWithStyle:style];
+            effect.interactive = NO;
+
+            // A subtle dark tint gives the selected lens the stronger,
+            // separated appearance of the native floating controls.
+            if (selectedLens) {
+                effect.tintColor =
+                    [UIColor.blackColor colorWithAlphaComponent:0.18];
+            }
+
+            return effect;
         }
     }
 
-    // Fallback keeps the tweak harmless if it is ever run below iOS 26.
-    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
+    return [UIBlurEffect
+        effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
 }
 
-static void YTLGConfigureGlassView(UIVisualEffectView *view) {
+static UIVisualEffect *YTLGContainerEffect(void) {
+    if (@available(iOS 26.0, *)) {
+        Class containerClass = NSClassFromString(@"UIGlassContainerEffect");
+
+        if (containerClass) {
+            UIGlassContainerEffect *effect =
+                [[UIGlassContainerEffect alloc] init];
+
+            // Allows the moving selected lens and the main capsule to
+            // visually interact/merge instead of looking like unrelated
+            // blur rectangles.
+            effect.spacing = 12.0;
+            return effect;
+        }
+    }
+
+    return nil;
+}
+
+static void YTLGPrepareGlassView(UIVisualEffectView *view) {
     view.userInteractionEnabled = NO;
+    view.opaque = NO;
+    view.backgroundColor = UIColor.clearColor;
     view.clipsToBounds = YES;
     view.layer.cornerCurve = kCACornerCurveContinuous;
 }
 
-static UIVisualEffectView *YTLGBarGlassView(UIView *bar) {
-    UIVisualEffectView *glass = objc_getAssociatedObject(bar, kYTLGBarGlassKey);
-    if (!glass) {
-        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(NO)];
-        YTLGConfigureGlassView(glass);
-        glass.accessibilityIdentifier = @"YTLiquidGlass.TabBarBackground";
-        [bar insertSubview:glass atIndex:0];
-        objc_setAssociatedObject(bar, kYTLGBarGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#pragma mark - Glass hierarchy
+
+static UIVisualEffectView *YTLGCompositor(YTPivotBarView *bar) {
+    UIVisualEffectView *view =
+        objc_getAssociatedObject(bar, kYTLGCompositorKey);
+
+    if (!view) {
+        view = [[UIVisualEffectView alloc]
+            initWithEffect:YTLGContainerEffect()];
+
+        view.userInteractionEnabled = NO;
+        view.opaque = NO;
+        view.backgroundColor = UIColor.clearColor;
+        view.clipsToBounds = NO;
+        view.contentView.clipsToBounds = NO;
+        view.accessibilityIdentifier =
+            @"YTLiquidGlass.GlassContainer";
+
+        [bar insertSubview:view atIndex:0];
+
+        objc_setAssociatedObject(
+            bar,
+            kYTLGCompositorKey,
+            view,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
     }
+
+    return view;
+}
+
+static UIVisualEffectView *YTLGBackgroundGlass(YTPivotBarView *bar) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(bar, kYTLGBackgroundKey);
+
+    if (!glass) {
+        UIVisualEffectView *compositor = YTLGCompositor(bar);
+
+        glass = [[UIVisualEffectView alloc]
+            initWithEffect:YTLGGlassEffect(NO, NO)];
+
+        YTLGPrepareGlassView(glass);
+
+        glass.accessibilityIdentifier =
+            @"YTLiquidGlass.FloatingTabBar";
+
+        [compositor.contentView addSubview:glass];
+
+        objc_setAssociatedObject(
+            bar,
+            kYTLGBackgroundKey,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
     return glass;
 }
 
-static UIVisualEffectView *YTLGItemGlassView(UIView *item) {
-    UIVisualEffectView *glass = objc_getAssociatedObject(item, kYTLGItemGlassKey);
-    if (!glass) {
-        glass = [[UIVisualEffectView alloc] initWithEffect:YTLGGlassEffect(YES)];
-        YTLGConfigureGlassView(glass);
-        glass.accessibilityIdentifier = @"YTLiquidGlass.SelectedTab";
+static UIVisualEffectView *YTLGSelectionLens(YTPivotBarView *bar) {
+    UIVisualEffectView *lens =
+        objc_getAssociatedObject(bar, kYTLGLensKey);
 
-        if (@available(iOS 26.0, *)) {
-            UIGlassEffect *effect = (UIGlassEffect *)glass.effect;
-            if ([effect isKindOfClass:NSClassFromString(@"UIGlassEffect")]) {
-                effect.interactive = NO;
-                effect.tintColor = [UIColor.secondaryLabelColor colorWithAlphaComponent:0.08];
-            }
-        }
+    if (!lens) {
+        UIVisualEffectView *compositor = YTLGCompositor(bar);
 
-        [item insertSubview:glass atIndex:0];
-        objc_setAssociatedObject(item, kYTLGItemGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return glass;
-}
+        lens = [[UIVisualEffectView alloc]
+            initWithEffect:YTLGGlassEffect(YES, YES)];
 
-static void YTLGStyleBar(YTPivotBarView *bar) {
-    if (!bar || CGRectIsEmpty(bar.bounds)) return;
+        YTLGPrepareGlassView(lens);
 
-    // Visual-only changes. Do not touch the pivot renderer, item array,
-    // identifiers, actions, delegates, or navigation controller.
-    bar.opaque = NO;
-    bar.backgroundColor = UIColor.clearColor;
+        lens.hidden = YES;
+        lens.accessibilityIdentifier =
+            @"YTLiquidGlass.SelectedLens";
 
-    UIVisualEffectView *glass = YTLGBarGlassView(bar);
+        [compositor.contentView addSubview:lens];
 
-    CGFloat horizontalInset = 8.0;
-    CGFloat verticalInset = 4.0;
-    CGRect frame = CGRectInset(bar.bounds, horizontalInset, verticalInset);
-
-    // Avoid invalid geometry during transient layout passes.
-    if (frame.size.width < 1.0 || frame.size.height < 1.0) {
-        frame = bar.bounds;
+        objc_setAssociatedObject(
+            bar,
+            kYTLGLensKey,
+            lens,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
     }
 
-    glass.frame = frame;
-    glass.layer.cornerRadius = MAX(0.0, frame.size.height * 0.5);
-
-    // Keep the glass behind whatever tab items YTLite/YouTube currently owns.
-    [bar sendSubviewToBack:glass];
+    return lens;
 }
+
+#pragma mark - YouTube/YTLite items
 
 static BOOL YTLGItemIsSelected(YTPivotBarItemView *item) {
-    NSString *itemIdentifier = item.renderer.pivotIdentifier;
-    NSString *selectedIdentifier = item.delegate.selectedPivotIdentifier;
+    if (!item) return NO;
 
-    if (itemIdentifier.length == 0 || selectedIdentifier.length == 0) {
+    NSString *itemIdentifier = item.renderer.pivotIdentifier;
+    NSString *selectedIdentifier =
+        item.delegate.selectedPivotIdentifier;
+
+    if (itemIdentifier.length == 0 ||
+        selectedIdentifier.length == 0) {
         return NO;
     }
 
-    return [itemIdentifier isEqualToString:selectedIdentifier];
+    return [itemIdentifier
+        isEqualToString:selectedIdentifier];
 }
 
-static void YTLGStyleItem(YTPivotBarItemView *item) {
-    if (!item || CGRectIsEmpty(item.bounds)) return;
-
-    UIVisualEffectView *glass = YTLGItemGlassView(item);
-    BOOL selected = YTLGItemIsSelected(item);
-
-    glass.hidden = !selected;
-    if (!selected) return;
-
-    CGFloat horizontalInset = MAX(3.0, item.bounds.size.width * 0.10);
-    CGFloat verticalInset = 5.0;
-    CGRect frame = CGRectInset(item.bounds, horizontalInset, verticalInset);
-
-    if (frame.size.width < 1.0 || frame.size.height < 1.0) {
-        frame = item.bounds;
-    }
-
-    glass.frame = frame;
-    glass.layer.cornerRadius = MAX(0.0, frame.size.height * 0.5);
-    [item sendSubviewToBack:glass];
-}
-
-static void YTLGRefreshItems(UIView *view) {
+static void YTLGCollectItems(
+    UIView *view,
+    NSMutableArray<YTPivotBarItemView *> *items
+) {
     if (!view) return;
 
-    Class itemClass = NSClassFromString(@"YTPivotBarItemView");
-    if (itemClass && [view isKindOfClass:itemClass]) {
-        YTLGStyleItem((YTPivotBarItemView *)view);
+    Class itemClass =
+        NSClassFromString(@"YTPivotBarItemView");
+
+    if (itemClass &&
+        [view isKindOfClass:itemClass]) {
+        [items addObject:(YTPivotBarItemView *)view];
+        return;
     }
 
     for (UIView *subview in view.subviews) {
-        YTLGRefreshItems(subview);
+        // Do not walk our own visual-effect hierarchy.
+        if ([subview.accessibilityIdentifier
+                hasPrefix:@"YTLiquidGlass."]) {
+            continue;
+        }
+
+        YTLGCollectItems(subview, items);
     }
 }
 
-static void YTLGRefreshPivotBar(YTPivotBarViewController *controller) {
-    UIView *bar = [controller pivotBarView];
+static NSArray<YTPivotBarItemView *> *
+YTLGCurrentItems(YTPivotBarView *bar) {
+    NSMutableArray<YTPivotBarItemView *> *items =
+        [NSMutableArray array];
+
+    YTLGCollectItems(bar, items);
+
+    [items sortUsingComparator:
+        ^NSComparisonResult(
+            YTPivotBarItemView *a,
+            YTPivotBarItemView *b
+        ) {
+            CGRect frameA =
+                [a convertRect:a.bounds toView:bar];
+            CGRect frameB =
+                [b convertRect:b.bounds toView:bar];
+
+            if (CGRectGetMinX(frameA) <
+                CGRectGetMinX(frameB)) {
+                return NSOrderedAscending;
+            }
+
+            if (CGRectGetMinX(frameA) >
+                CGRectGetMinX(frameB)) {
+                return NSOrderedDescending;
+            }
+
+            return NSOrderedSame;
+        }];
+
+    return items;
+}
+
+#pragma mark - Geometry
+
+static CGRect YTLGCapsuleFrame(YTPivotBarView *bar) {
+    CGRect bounds = bar.bounds;
+
+    CGFloat safeBottom = bar.safeAreaInsets.bottom;
+
+    // Keep the floating material around the actual tab content instead
+    // of extending through the entire home-indicator/safe-area region.
+    CGFloat usableHeight =
+        MAX(44.0, bounds.size.height - safeBottom);
+
+    CGFloat horizontalInset =
+        MAX(14.0, bounds.size.width * 0.04);
+
+    CGFloat capsuleHeight =
+        MIN(60.0, MAX(50.0, usableHeight - 4.0));
+
+    CGFloat y =
+        MAX(2.0, (usableHeight - capsuleHeight) * 0.5);
+
+    CGFloat width =
+        MAX(1.0,
+            bounds.size.width - horizontalInset * 2.0);
+
+    return CGRectMake(
+        horizontalInset,
+        y,
+        width,
+        capsuleHeight
+    );
+}
+
+static CGRect YTLGLensFrame(
+    YTPivotBarView *bar,
+    YTPivotBarItemView *item,
+    CGRect capsuleFrame
+) {
+    CGRect itemFrame =
+        [item convertRect:item.bounds toView:bar];
+
+    // Use the tab's real runtime width so YTLite custom tabs,
+    // removals and reordered layouts are followed automatically.
+    CGFloat sideInset =
+        MAX(3.0, itemFrame.size.width * 0.055);
+
+    CGFloat desiredWidth =
+        MAX(44.0, itemFrame.size.width - sideInset * 2.0);
+
+    CGFloat lensHeight =
+        MAX(42.0, capsuleFrame.size.height - 6.0);
+
+    lensHeight =
+        MIN(lensHeight, capsuleFrame.size.height - 2.0);
+
+    CGFloat x =
+        CGRectGetMidX(itemFrame) - desiredWidth * 0.5;
+
+    CGFloat y =
+        CGRectGetMidY(capsuleFrame) - lensHeight * 0.5;
+
+    CGFloat minX =
+        CGRectGetMinX(capsuleFrame) + 2.0;
+
+    CGFloat maxX =
+        CGRectGetMaxX(capsuleFrame) - 2.0 - desiredWidth;
+
+    if (maxX < minX) {
+        maxX = minX;
+    }
+
+    x = MIN(MAX(x, minX), maxX);
+
+    return CGRectMake(
+        x,
+        y,
+        desiredWidth,
+        lensHeight
+    );
+}
+
+static BOOL YTLGFramesNearlyEqual(
+    CGRect a,
+    CGRect b
+) {
+    const CGFloat epsilon = 0.5;
+
+    return fabs(a.origin.x - b.origin.x) < epsilon &&
+           fabs(a.origin.y - b.origin.y) < epsilon &&
+           fabs(a.size.width - b.size.width) < epsilon &&
+           fabs(a.size.height - b.size.height) < epsilon;
+}
+
+#pragma mark - Styling
+
+static void YTLGClearOriginalBarChrome(
+    YTPivotBarView *bar
+) {
+    // Remove the old full-width slab. Do not hide or replace the
+    // item views themselves, so navigation and YTLite behavior stay intact.
+    bar.opaque = NO;
+    bar.backgroundColor = UIColor.clearColor;
+    bar.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+    bar.clipsToBounds = NO;
+    bar.layer.masksToBounds = NO;
+}
+
+static void YTLGUpdateGlass(
+    YTPivotBarView *bar,
+    BOOL animated
+) {
+    if (!bar ||
+        CGRectIsEmpty(bar.bounds) ||
+        !bar.window) {
+        return;
+    }
+
+    YTLGClearOriginalBarChrome(bar);
+
+    UIVisualEffectView *compositor =
+        YTLGCompositor(bar);
+
+    UIVisualEffectView *background =
+        YTLGBackgroundGlass(bar);
+
+    UIVisualEffectView *lens =
+        YTLGSelectionLens(bar);
+
+    compositor.frame = bar.bounds;
+
+    CGRect capsuleFrame =
+        YTLGCapsuleFrame(bar);
+
+    background.frame = capsuleFrame;
+    background.layer.cornerRadius =
+        capsuleFrame.size.height * 0.5;
+
+    // Keep our effect hierarchy underneath YouTube's actual tab controls.
+    [bar sendSubviewToBack:compositor];
+
+    NSArray<YTPivotBarItemView *> *items =
+        YTLGCurrentItems(bar);
+
+    YTPivotBarItemView *selectedItem = nil;
+
+    for (YTPivotBarItemView *item in items) {
+        // Remove any item-level background color without touching
+        // its image/title hierarchy or interaction.
+        item.opaque = NO;
+        item.backgroundColor = UIColor.clearColor;
+
+        if (YTLGItemIsSelected(item)) {
+            selectedItem = item;
+        }
+    }
+
+    if (!selectedItem) {
+        lens.hidden = YES;
+        return;
+    }
+
+    CGRect targetFrame =
+        YTLGLensFrame(
+            bar,
+            selectedItem,
+            capsuleFrame
+        );
+
+    lens.layer.cornerRadius =
+        targetFrame.size.height * 0.5;
+
+    if (lens.hidden ||
+        !animated ||
+        CGRectIsEmpty(lens.frame)) {
+
+        lens.hidden = NO;
+        lens.frame = targetFrame;
+        return;
+    }
+
+    if (YTLGFramesNearlyEqual(
+            lens.frame,
+            targetFrame)) {
+        return;
+    }
+
+    [UIView animateWithDuration:0.34
+                          delay:0.0
+         usingSpringWithDamping:0.88
+          initialSpringVelocity:0.18
+                        options:
+                            UIViewAnimationOptionBeginFromCurrentState |
+                            UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+                         lens.frame = targetFrame;
+                         lens.layer.cornerRadius =
+                             targetFrame.size.height * 0.5;
+                     }
+                     completion:nil];
+}
+
+static void YTLGRefreshSoon(
+    YTPivotBarView *bar,
+    BOOL animated
+) {
     if (!bar) return;
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [bar setNeedsLayout];
-        [bar layoutIfNeeded];
-        YTLGRefreshItems(bar);
-    });
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            [bar setNeedsLayout];
+            [bar layoutIfNeeded];
+            YTLGUpdateGlass(bar, animated);
+        }
+    );
 }
+
+static void YTLGRefreshController(
+    YTPivotBarViewController *controller,
+    BOOL animated
+) {
+    UIView *view = [controller pivotBarView];
+
+    if (!view ||
+        ![view isKindOfClass:
+            NSClassFromString(@"YTPivotBarView")]) {
+        return;
+    }
+
+    YTLGRefreshSoon(
+        (YTPivotBarView *)view,
+        animated
+    );
+}
+
+#pragma mark - Hooks
 
 %group YTLiquidGlass
 
@@ -174,40 +507,43 @@ static void YTLGRefreshPivotBar(YTPivotBarViewController *controller) {
 
 - (void)layoutSubviews {
     %orig;
-    YTLGStyleBar(self);
-    YTLGRefreshItems(self);
+
+    // No animation during ordinary layout passes.
+    YTLGUpdateGlass(self, NO);
 }
 
 - (void)didMoveToWindow {
     %orig;
+
     if (self.window) {
-        YTLGStyleBar(self);
-        YTLGRefreshItems(self);
+        YTLGRefreshSoon(self, NO);
     }
+}
+
+- (void)safeAreaInsetsDidChange {
+    %orig;
+
+    YTLGRefreshSoon(self, NO);
 }
 
 - (void)selectItemWithPivotIdentifier:(id)identifier {
     %orig(identifier);
-    [self setNeedsLayout];
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        YTLGRefreshItems(self);
-    });
+    // The selected item is already owned/changed by YouTube/YTLite.
+    // We only move the single glass lens to its new runtime frame.
+    YTLGRefreshSoon(self, YES);
 }
 
 %end
 
 %hook YTPivotBarItemView
 
-- (void)layoutSubviews {
-    %orig;
-    YTLGStyleItem(self);
-}
-
 - (void)didMoveToWindow {
     %orig;
+
     if (self.window) {
-        YTLGStyleItem(self);
+        self.opaque = NO;
+        self.backgroundColor = UIColor.clearColor;
     }
 }
 
@@ -217,12 +553,14 @@ static void YTLGRefreshPivotBar(YTPivotBarViewController *controller) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
-    YTLGRefreshPivotBar(self);
+
+    YTLGRefreshController(self, NO);
 }
 
 - (void)selectItemWithPivotIdentifier:(id)identifier {
     %orig(identifier);
-    YTLGRefreshPivotBar(self);
+
+    YTLGRefreshController(self, YES);
 }
 
 %end
@@ -231,9 +569,12 @@ static void YTLGRefreshPivotBar(YTPivotBarViewController *controller) {
 
 %ctor {
     if (@available(iOS 26.0, *)) {
-        if (NSClassFromString(@"YTPivotBarView") &&
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"UIGlassContainerEffect") &&
+            NSClassFromString(@"YTPivotBarView") &&
             NSClassFromString(@"YTPivotBarItemView") &&
             NSClassFromString(@"YTPivotBarViewController")) {
+
             %init(YTLiquidGlass);
         }
     }
