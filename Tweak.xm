@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.0.1 — Consolidated non-player Liquid Glass + global pills/subscription controls
+// YTLiquidGlass v3.1 — Selective non-player Liquid Glass cleanup
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -3399,6 +3399,11 @@ static void YTLGRefreshChannelHeaderSoon(
     );
 }
 
+// NOTE v3.1:
+// This group is intentionally NOT initialized. Scanning every titled button in
+// YTC4TabbedHeaderView also catches Home/Videos/Shorts/Live/Playlists tabs.
+// Subscribe/notification controls are instead handled by the selective
+// YTSubscribeSwitch / notification hooks below.
 %group YTLiquidGlassChannelActions
 
 %hook YTC4TabbedHeaderView
@@ -3864,7 +3869,16 @@ YTLGRefreshWatchOwnerGlassSoon(
 
 
 
-#pragma mark - Global normal-app Liquid Glass pills and subscription controls
+#pragma mark - Reusable normal-app helpers + subscription controls
+
+// NOTE v3.1:
+// The YTLiquidGlassGenericPills group below is intentionally NOT initialized.
+// A global hook on YTLightweightQTMButton was too broad: YouTube reuses that
+// class for category tabs, channel tabs, filter/header controls and many other
+// navigation elements. Keeping the helper code available lets the selective
+// subscription/bell hooks reuse its guard functions without turning every
+// navigation button into an isolated glass capsule.
+
 
 // This module intentionally targets YouTube's reusable normal-app controls
 // instead of hard-coding English labels such as "Create a channel" or
@@ -4425,25 +4439,11 @@ YTLGShouldGlassSubscribeControl(
             %init(YTLiquidGlassNativeActionMenus);
         }
 
-        if (NSClassFromString(@"YTC4TabbedHeaderView") &&
-            [UIButtonConfiguration
-                respondsToSelector:
-                    @selector(glassButtonConfiguration)]) {
-
-            %init(YTLiquidGlassChannelActions);
-        }
-
         if (NSClassFromString(@"UIGlassEffect") &&
             (NSClassFromString(@"YTSlimVideoDetailsActionView") ||
              NSClassFromString(@"YTSlimVideoOwnerView"))) {
 
             %init(YTLiquidGlassWatchMetadataActions);
-        }
-
-        if (NSClassFromString(@"UIGlassEffect") &&
-            NSClassFromString(@"YTLightweightQTMButton")) {
-
-            %init(YTLiquidGlassGenericPills);
         }
 
         if (NSClassFromString(@"UIGlassEffect") &&
