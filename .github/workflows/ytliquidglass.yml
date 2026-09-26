@@ -1,0 +1,146 @@
+name: Build YTLiquidGlass DEB
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build YTLiquidGlass
+    runs-on: xcode-27
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          brew install make ldid dpkg
+
+      - name: Configure environment
+        run: |
+          set -euo pipefail
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "THEOS=${{ github.workspace }}/theos" >> "$GITHUB_ENV"
+
+      - name: Get Theos commit
+        run: |
+          set -euo pipefail
+          THEOS_COMMIT="$(git ls-remote https://github.com/theos/theos HEAD | awk '{print substr($1,1,7)}')"
+          echo "THEOS_COMMIT=$THEOS_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v6
+        with:
+          path: theos
+          key: ytlq-theos-${{ runner.os }}-${{ env.THEOS_COMMIT }}
+
+      - name: Setup Theos
+        if: ${{ steps.cache-theos.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+
+          git clone --quiet --depth=1 --recurse-submodules \
+            https://github.com/theos/theos.git "$THEOS"
+
+          # Keep the same Logos revision used by the working IPA workflow.
+          cd "$THEOS/vendor/logos"
+          git checkout a62370066a97e36d59b200a9fa10c5091f5e8972
+
+      - name: Configure Xcode iOS SDK for Theos
+        run: |
+          set -euo pipefail
+
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+
+          echo "Xcode:"
+          xcodebuild -version
+          echo "iOS SDK: $SDK_VERSION"
+          echo "SDK path: $SDK_PATH"
+
+          rm -rf "$THEOS/sdks"
+          mkdir -p "$THEOS/sdks"
+          ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
+
+          test -d "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
+
+      - name: Fix Theos broken pipe issue
+        run: |
+          sed -i '' \
+            's/od -c "$i" | head/od -c "$i" 2>\/dev\/null | head/g' \
+            "$THEOS/bin/convert_xml_plist.sh" || true
+
+      - name: Verify tweak source
+        run: |
+          set -euo pipefail
+
+          for file in Makefile Tweak.xm control YTLiquidGlass.plist; do
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing required file: $file"
+              exit 1
+            fi
+          done
+
+          echo "Files used for the build:"
+          ls -lh Makefile Tweak.xm control YTLiquidGlass.plist
+
+      - name: Build YTLiquidGlass DEB
+        run: |
+          set -euo pipefail
+
+          make clean package \
+            DEBUG=0 \
+            FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=rootless \
+            ARCHS=arm64
+
+          DEB="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+          if [ -z "$DEB" ]; then
+            echo "::error::Theos did not produce a .deb package."
+            exit 1
+          fi
+
+          cp "$DEB" YTLiquidGlass.deb
+
+          echo "Built package:"
+          ls -lh YTLiquidGlass.deb
+
+      - name: Validate DEB
+        run: |
+          set -euo pipefail
+
+          dpkg-deb --info YTLiquidGlass.deb
+
+          PACKAGE="$(dpkg-deb -f YTLiquidGlass.deb Package)"
+          VERSION="$(dpkg-deb -f YTLiquidGlass.deb Version)"
+          ARCH="$(dpkg-deb -f YTLiquidGlass.deb Architecture)"
+
+          echo "Package: $PACKAGE"
+          echo "Version: $VERSION"
+          echo "Architecture: $ARCH"
+
+          {
+            echo "### YTLiquidGlass DEB built successfully"
+            echo ""
+            echo "- Package: \`$PACKAGE\`"
+            echo "- Version: \`$VERSION\`"
+            echo "- Architecture: \`$ARCH\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload YTLiquidGlass DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTLiquidGlass-DEB
+          path: YTLiquidGlass.deb
+          if-no-files-found: error
+          compression-level: 0
