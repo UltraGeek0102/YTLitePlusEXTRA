@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// YTLiquidGlass v3.2 — Selective Liquid Glass + current watch action bar
+// YTLiquidGlass v3.2.1 — Selective Liquid Glass + current watch action bar
 //
 // Goals:
 //   • Use UIKit's own iOS 26+/27 Liquid Glass tab bar presentation.
@@ -3405,32 +3405,6 @@ static void YTLGRefreshChannelHeaderSoon(
     );
 }
 
-// NOTE v3.1:
-// This group is intentionally NOT initialized. Scanning every titled button in
-// YTC4TabbedHeaderView also catches Home/Videos/Shorts/Live/Playlists tabs.
-// Subscribe/notification controls are instead handled by the selective
-// YTSubscribeSwitch / notification hooks below.
-%group YTLiquidGlassChannelActions
-
-%hook YTC4TabbedHeaderView
-
-- (void)layoutSubviews {
-    %orig;
-
-    YTLGUpdateChannelHeaderButtons(self);
-}
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (self.window) {
-        YTLGRefreshChannelHeaderSoon(self);
-    }
-}
-
-%end
-
-%end
 
 
 #pragma mark - Watch-page metadata/action Liquid Glass
@@ -4095,13 +4069,9 @@ YTLGRefreshCurrentWatchActionTreeSoon(
 
 #pragma mark - Reusable normal-app helpers + subscription controls
 
-// NOTE v3.1:
-// The YTLiquidGlassGenericPills group below is intentionally NOT initialized.
-// A global hook on YTLightweightQTMButton was too broad: YouTube reuses that
-// class for category tabs, channel tabs, filter/header controls and many other
-// navigation elements. Keeping the helper code available lets the selective
-// subscription/bell hooks reuse its guard functions without turning every
-// navigation button into an isolated glass capsule.
+// v3.2.1: The broad YTLightweightQTMButton hook was removed entirely.
+// YouTube reuses that class for navigation/category/filter controls, so only
+// dedicated subscription/notification surfaces are styled below.
 
 
 // This module intentionally targets YouTube's reusable normal-app controls
@@ -4443,45 +4413,6 @@ YTLGRefreshGenericPillSoon(
     );
 }
 
-%group YTLiquidGlassGenericPills
-
-%hook YTLightweightQTMButton
-
-- (void)layoutSubviews {
-    %orig;
-
-    YTLGUpdateGenericPillGlass(self);
-}
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (self.window) {
-        YTLGRefreshGenericPillSoon(self);
-    }
-}
-
-- (void)setSelected:(BOOL)selected {
-    %orig(selected);
-
-    YTLGRefreshGenericPillSoon(self);
-}
-
-- (void)setHighlighted:(BOOL)highlighted {
-    %orig(highlighted);
-
-    YTLGRefreshGenericPillSoon(self);
-}
-
-- (void)setEnabled:(BOOL)enabled {
-    %orig(enabled);
-
-    YTLGRefreshGenericPillSoon(self);
-}
-
-%end
-
-%end
 
 
 #pragma mark - Global Subscribe / notification glass
