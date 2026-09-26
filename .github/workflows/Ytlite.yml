@@ -33,6 +33,12 @@ on:
         required: true
         type: string
 
+      liquidglass:
+        description: "Integrate YTLiquidGlass"
+        default: true
+        required: false
+        type: boolean
+
       youpip:
         description: "Integrate YouPiP"
         default: true
@@ -138,7 +144,10 @@ jobs:
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,ytlite_version,youpip,ytuhd,ryd,abconfig,youquality,ytnovote,youshare,gonerino,ytweaks,yougetcaption,demc,volboost,uncappedavplayer,youslider,native_share
+          exclude_inputs: bundle_id,display_name,ytlite_version,youpip,ytuhd,ryd,abconfig,youquality,ytnovote,youshare,gonerino,ytweaks,yougetcaption,demc,volboost,uncappedavplayer,youslider,native_share,liquidglass
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v7
 
       - name: Install MEGA downloader
         if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') || startsWith(inputs.ytlite_deb_url, 'https://mega.nz/') }}
@@ -587,6 +596,13 @@ jobs:
           cd VolumeBoostYT
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
           mv packages/*.deb ${{ github.workspace }}/volboostyt.deb
+      
+      - name: Build YTLiquidGlass
+        if: ${{ inputs.liquidglass }}
+        run: |
+          cd YTLiquidGlass
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          mv packages/*.deb ${{ github.workspace }}/ytliquidglass.deb
           
       - name: Inject Tweaks Into IPA
         run: |
