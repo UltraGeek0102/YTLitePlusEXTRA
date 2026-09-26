@@ -1,6 +1,6 @@
 Package: com.ultrageek.ytliquidglass
 Name: YTLiquidGlass
-Version: 3.2.1
+Version: 3.2.2
 Architecture: iphoneos-arm64
 Description: Applies iOS Liquid Glass styling to YouTube's existing pivot tab bar without replacing YTLite tab-management logic.
 Maintainer: UltraGeek0102
