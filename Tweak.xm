@@ -1433,9 +1433,7 @@ static UIVisualEffect *YTLGTopNavigationGlassEffect(void) {
 
             // The YouTube buttons remain the hit-test owners above this
             // sibling glass surface.
-            // Interactive material gives compact controls and moving
-            // selection lenses UIKit's touch response on iOS 26+.
-            effect.interactive = prominent;
+            effect.interactive = NO;
             return effect;
         }
     }
@@ -3491,7 +3489,7 @@ YTLGScopedGlassEffect(BOOL prominent) {
                     effectWithStyle:
                         UIGlassEffectStyleRegular];
 
-            effect.interactive = NO;
+            effect.interactive = prominent;
 
             if (prominent) {
                 effect.tintColor =
