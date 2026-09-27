@@ -1,4 +1,4 @@
-// YTLiquidGlass EXPERIMENTAL ALL-IN-ONE — stable core + next native glass surfaces
+// YTLiquidGlass EXPERIMENTAL vNext — stable core + scoped rails + Create-tab fix
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -103,7 +103,9 @@ static const void *kYTLGRefreshingKey = &kYTLGRefreshingKey;
 
 @interface YTLGNativeTabBar : UITabBar <UITabBarDelegate>
 @property(nonatomic, weak) YTPivotBarViewController *youtubeController;
+@property(nonatomic, weak) YTPivotBarView *youtubePivotBar;
 @property(nonatomic, copy) NSArray<NSString *> *pivotIdentifiers;
+@property(nonatomic, copy) NSDictionary<NSString *, UIButton *> *originalButtons;
 @property(nonatomic, copy) NSString *contentSignature;
 @property(nonatomic, assign) BOOL syncingSelection;
 @end
@@ -149,9 +151,60 @@ static const void *kYTLGRefreshingKey = &kYTLGRefreshingKey;
     NSString *identifier =
         self.pivotIdentifiers[index];
 
-    if (identifier.length > 0 &&
-        self.youtubeController) {
+    if (identifier.length == 0) {
+        return;
+    }
 
+    // YouTube's Create/Upload pivot (FEuploads) is an action-only item rather
+    // than a persistent navigation destination. Calling
+    // selectItemWithPivotIdentifier: on it does not reliably open Create.
+    // Forward the tap to YouTube's original hidden button instead.
+    if ([identifier
+            caseInsensitiveCompare:@"FEuploads"]
+        == NSOrderedSame) {
+
+        UIButton *originalButton =
+            self.originalButtons[identifier];
+
+        if ([originalButton
+                isKindOfClass:UIButton.class]) {
+
+            [originalButton
+                sendActionsForControlEvents:
+                    UIControlEventTouchUpInside];
+        }
+
+        // Create is momentary. Return UIKit's selection lens to YouTube's
+        // actual selected pivot after the Create menu is dispatched.
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                NSString *selected =
+                    self.youtubeController
+                        .selectedPivotIdentifier;
+
+                NSUInteger selectedIndex =
+                    [self.pivotIdentifiers
+                        indexOfObject:selected];
+
+                if (selectedIndex != NSNotFound &&
+                    selectedIndex <
+                        self.items.count) {
+
+                    self.syncingSelection = YES;
+                    self.selectedItem =
+                        self.items[
+                            selectedIndex
+                        ];
+                    self.syncingSelection = NO;
+                }
+            }
+        );
+
+        return;
+    }
+
+    if (self.youtubeController) {
         [self.youtubeController
             selectItemWithPivotIdentifier:identifier];
     }
@@ -326,6 +379,55 @@ YTLGItemViewsByIdentifier(YTPivotBarView *bar) {
 
     return map;
 }
+
+static UIButton *
+YTLGFindCreateButtonInView(
+    UIView *root
+) {
+    if (!root) return nil;
+
+    NSMutableArray<UIView *> *stack =
+        [NSMutableArray
+            arrayWithObject:root];
+
+    while (stack.count > 0) {
+        UIView *candidate =
+            stack.lastObject;
+
+        [stack removeLastObject];
+
+        if ([candidate
+                isKindOfClass:
+                    UIButton.class]) {
+
+            UIButton *button =
+                (UIButton *)candidate;
+
+            NSString *token =
+                [[NSString
+                    stringWithFormat:
+                        @"%@ %@ %@",
+                        button.accessibilityLabel ?: @"",
+                        button.accessibilityIdentifier ?: @"",
+                        button.currentTitle ?: @""]
+                    lowercaseString];
+
+            if ([token containsString:@"create"] ||
+                [token containsString:@"upload"]) {
+
+                return button;
+            }
+        }
+
+        for (UIView *subview
+                in candidate.subviews) {
+            [stack addObject:subview];
+        }
+    }
+
+    return nil;
+}
+
 
 static YTPivotBarView *
 YTLGAncestorPivotBar(UIView *view) {
@@ -830,6 +932,7 @@ static void YTLGRefreshNow(
     nativeBar.frame = bar.bounds;
     nativeBar.youtubeController =
         YTLGOwnerForBar(bar);
+    nativeBar.youtubePivotBar = bar;
 
     NSArray<NSString *> *identifiers =
         YTLGActiveIdentifiers(bar);
@@ -879,18 +982,89 @@ static void YTLGRefreshNow(
     if (![nativeBar.contentSignature
             isEqualToString:signature]) {
 
-        NSMutableArray<UITabBarItem *> *nativeItems =
+            NSMutableArray<UITabBarItem *> *nativeItems =
             [NSMutableArray array];
 
         NSMutableArray<NSString *> *nativeIdentifiers =
             [NSMutableArray array];
 
+        NSMutableDictionary<NSString *, UIButton *> *originalButtons =
+            [NSMutableDictionary dictionary];
+
         for (NSString *identifier in identifiers) {
             YTPivotBarItemView *itemView =
                 views[identifier];
 
-            // Wait for the concrete item view before exposing this tab.
-            // Item-view setRenderer:/layout hooks will trigger another refresh.
+            BOOL isCreate =
+                [identifier
+                    caseInsensitiveCompare:@"FEuploads"]
+                == NSOrderedSame;
+
+            // FEuploads may be represented as an icon-only renderer and not
+            // always expose a normal YTPivotBarItemView. Synthesize the native
+            // Create item while still forwarding its action to YouTube.
+            if (!itemView &&
+                isCreate) {
+
+                UIButton *createButton =
+                    YTLGFindCreateButtonInView(
+                        bar
+                    );
+
+                UIImage *normal =
+                    createButton.currentImage
+                    ?: [createButton
+                        imageForState:
+                            UIControlStateNormal]
+                    ?: [UIImage
+                        systemImageNamed:
+                            @"plus.circle"];
+
+                UIImage *selected =
+                    [createButton
+                        imageForState:
+                            UIControlStateSelected]
+                    ?: [UIImage
+                        systemImageNamed:
+                            @"plus.circle.fill"]
+                    ?: normal;
+
+                UITabBarItem *nativeItem =
+                    [[UITabBarItem alloc]
+                        initWithTitle:nil
+                               image:
+                                   YTLGNativeImage(
+                                       normal,
+                                       NO
+                                   )
+                       selectedImage:
+                                   YTLGNativeImage(
+                                       selected,
+                                       NO
+                                   )];
+
+                nativeItem.accessibilityLabel =
+                    createButton
+                        .accessibilityLabel
+                    ?: @"Create";
+
+                [nativeItems
+                    addObject:
+                        nativeItem];
+
+                [nativeIdentifiers
+                    addObject:
+                        identifier];
+
+                if (createButton) {
+                    originalButtons[identifier] =
+                        createButton;
+                }
+
+                continue;
+            }
+
+            // Wait for the concrete item view before exposing ordinary tabs.
             if (!itemView) {
                 continue;
             }
@@ -927,10 +1101,24 @@ static void YTLGRefreshNow(
 
             [nativeItems addObject:nativeItem];
             [nativeIdentifiers addObject:identifier];
+
+            UIButton *originalButton =
+                itemView.navigationButton;
+
+            if ([originalButton
+                    isKindOfClass:
+                        UIButton.class]) {
+
+                originalButtons[identifier] =
+                    originalButton;
+            }
         }
 
         nativeBar.pivotIdentifiers =
             nativeIdentifiers;
+
+        nativeBar.originalButtons =
+            originalButtons;
 
         // Standalone UITabBar displays the supplied items directly and never
         // synthesizes UITabBarController's "More" view controller.
@@ -3196,6 +3384,12 @@ static BOOL YTLGTryPresentNativeSheetMenu(
 @interface YTChipCloudCell : UIView
 @end
 
+@interface YTTabTitlesView : UIView
+@end
+
+@interface YTFeedChannelFilterHeaderView : UIView
+@end
+
 @interface YTKACERootOptionsController : UIViewController
 @end
 
@@ -3451,16 +3645,34 @@ YTLGScopedSurfaceKindForElementsView(
             ]
         );
 
-    if (channelContext &&
-        !watchContext &&
+    BOOL explicitSubscribe =
+        YTLGLabelStartsWith(
+            label,
+            @"subscribe"
+        ) ||
+        [token
+            containsString:
+                @"subscribe_button"];
+
+    BOOL wideChannelCTA =
+        CGRectGetWidth(view.bounds) >=
+            220.0 &&
+        CGRectGetHeight(view.bounds) >=
+            36.0 &&
+        CGRectGetHeight(view.bounds) <=
+            72.0;
+
+    if (!watchContext &&
+        explicitSubscribe &&
+        (channelContext ||
+         wideChannelCTA) &&
         YTLGViewHasCompactActionGeometry(
             view,
             64.0,
-            360.0) &&
-        (YTLGLabelStartsWith(label, @"subscribe") ||
-         [token containsString:@"subscribe_button"])) {
+            420.0)) {
 
-        return YTLGScopedSurfaceProminent;
+        return
+            YTLGScopedSurfaceProminent;
     }
 
     // ---- Comment controls ----
@@ -3484,7 +3696,10 @@ YTLGScopedSurfaceKindForElementsView(
         ([token containsString:@"sort"] ||
          [token containsString:@"filter"] ||
          [token containsString:@"send"] ||
-         [token containsString:@"reply"])) {
+         [token containsString:@"reply"] ||
+         [token containsString:@"dislike"] ||
+         ([token containsString:@"like"] &&
+          ![token containsString:@"unlike"]))) {
 
         return
             CGRectGetWidth(view.bounds) <= 56.0
@@ -3776,85 +3991,564 @@ YTLGApplyScopedElementsGlass(
 %end
 
 
-#pragma mark - One-piece top category/topic rail glass
+#pragma mark - Native glass tab/title rails + subscription filter header
+
+static const void *kYTLGTopTabRailGlassKey =
+    &kYTLGTopTabRailGlassKey;
+
+static const void *kYTLGTopTabSelectionGlassKey =
+    &kYTLGTopTabSelectionGlassKey;
+
+static const void *kYTLGTopTabPanHandlerKey =
+    &kYTLGTopTabPanHandlerKey;
+
+static const void *kYTLGSubscriptionHeaderGlassKey =
+    &kYTLGSubscriptionHeaderGlassKey;
+
+static const void *kYTLGChipCollectionGlassKey =
+    &kYTLGChipCollectionGlassKey;
+
+static const void *kYTLGChipSelectedGlassKey =
+    &kYTLGChipSelectedGlassKey;
+
+static BOOL
+YTLGViewLooksSelected(
+    UIView *view
+) {
+    if (!view) return NO;
+
+    if ((view.accessibilityTraits &
+         UIAccessibilityTraitSelected) != 0) {
+        return YES;
+    }
+
+    SEL selector =
+        NSSelectorFromString(
+            @"isSelected"
+        );
+
+    if ([view respondsToSelector:selector]) {
+        return
+            ((BOOL (*)(id, SEL))
+                objc_msgSend)(
+                    view,
+                    selector
+                );
+    }
+
+    return NO;
+}
 
 static void
-YTLGUpdateChipRailGlass(
-    UIView *cell
+YTLGCollectTabButtons(
+    UIView *root,
+    UIView *view,
+    NSMutableArray<UIView *> *result
 ) {
-    if (!cell ||
-        !cell.window ||
-        cell.hidden ||
-        cell.alpha <= 0.01 ||
-        CGRectIsEmpty(cell.bounds)) {
+    if (!view) return;
+
+    NSString *className =
+        NSStringFromClass(view.class);
+
+    if (view != root &&
+        [className
+            containsString:
+                @"YTTabButton"] &&
+        !view.hidden &&
+        view.alpha > 0.01 &&
+        !CGRectIsEmpty(view.bounds)) {
+
+        [result addObject:view];
         return;
     }
 
-    CGFloat height =
-        CGRectGetHeight(
-            cell.bounds
+    for (UIView *subview
+            in view.subviews) {
+        YTLGCollectTabButtons(
+            root,
+            subview,
+            result
+        );
+    }
+}
+
+static NSArray<UIView *> *
+YTLGTopTabButtons(
+    UIView *root
+) {
+    NSMutableArray<UIView *> *buttons =
+        [NSMutableArray array];
+
+    YTLGCollectTabButtons(
+        root,
+        root,
+        buttons
+    );
+
+    [buttons sortUsingComparator:
+        ^NSComparisonResult(
+            UIView *left,
+            UIView *right) {
+
+        CGRect leftFrame =
+            [left.superview
+                convertRect:left.frame
+                     toView:root];
+
+        CGRect rightFrame =
+            [right.superview
+                convertRect:right.frame
+                     toView:root];
+
+        if (CGRectGetMinX(leftFrame) <
+            CGRectGetMinX(rightFrame)) {
+            return NSOrderedAscending;
+        }
+
+        if (CGRectGetMinX(leftFrame) >
+            CGRectGetMinX(rightFrame)) {
+            return NSOrderedDescending;
+        }
+
+        return NSOrderedSame;
+    }];
+
+    return buttons;
+}
+
+static CGRect
+YTLGFrameForSubviewInRoot(
+    UIView *view,
+    UIView *root
+) {
+    if (!view || !root) {
+        return CGRectZero;
+    }
+
+    return
+        [view.superview
+            convertRect:view.frame
+                 toView:root];
+}
+
+static CGRect
+YTLGUnionFramesForViews(
+    NSArray<UIView *> *views,
+    UIView *root
+) {
+    CGRect result =
+        CGRectNull;
+
+    for (UIView *view in views) {
+        CGRect frame =
+            YTLGFrameForSubviewInRoot(
+                view,
+                root
+            );
+
+        if (CGRectIsEmpty(frame)) {
+            continue;
+        }
+
+        result =
+            CGRectIsNull(result)
+                ? frame
+                : CGRectUnion(
+                    result,
+                    frame
+                );
+    }
+
+    return
+        CGRectIsNull(result)
+            ? CGRectZero
+            : result;
+}
+
+static UIControl *
+YTLGFirstControlInView(
+    UIView *view
+) {
+    if (!view) return nil;
+
+    if ([view
+            isKindOfClass:
+                UIControl.class]) {
+        return
+            (UIControl *)view;
+    }
+
+    for (UIView *subview
+            in view.subviews) {
+        UIControl *control =
+            YTLGFirstControlInView(
+                subview
+            );
+
+        if (control) {
+            return control;
+        }
+    }
+
+    return nil;
+}
+
+static UIView *
+YTLGTopTabAtPoint(
+    UIView *root,
+    CGPoint point
+) {
+    NSArray<UIView *> *buttons =
+        YTLGTopTabButtons(
+            root
         );
 
-    // This class is also reused internally. Only the compact horizontal chip
-    // rail should receive one continuous glass strip.
-    if (height < 32.0 ||
-        height > 84.0) {
+    UIView *nearest = nil;
+    CGFloat nearestDistance =
+        CGFLOAT_MAX;
 
-        YTLGHideScopedGlassIfPresent(
-            cell,
-            kYTLGChipRailGlassKey
-        );
+    for (UIView *button in buttons) {
+        CGRect frame =
+            CGRectInset(
+                YTLGFrameForSubviewInRoot(
+                    button,
+                    root
+                ),
+                -8.0,
+                -8.0
+            );
+
+        if (CGRectContainsPoint(
+                frame,
+                point)) {
+            return button;
+        }
+
+        CGFloat distance =
+            fabs(
+                CGRectGetMidX(frame) -
+                point.x
+            );
+
+        if (distance <
+            nearestDistance) {
+            nearestDistance =
+                distance;
+            nearest = button;
+        }
+    }
+
+    return nearest;
+}
+
+static void
+YTLGMoveTopTabSelectionGlass(
+    UIView *root,
+    UIView *button,
+    BOOL animated
+) {
+    if (!root || !button) {
         return;
     }
 
-    UIVisualEffectView *glass =
+    UIVisualEffectView *selection =
         YTLGScopedGlassView(
-            cell,
-            kYTLGChipRailGlassKey,
-            NO,
-            @"YTLiquidGlass.TopicRail"
+            root,
+            kYTLGTopTabSelectionGlassKey,
+            YES,
+            @"YTLiquidGlass.TopTabSelection"
         );
 
     CGRect frame =
-        CGRectInset(
-            cell.bounds,
-            6.0,
-            3.0
+        YTLGFrameForSubviewInRoot(
+            button,
+            root
         );
 
-    if (CGRectGetWidth(frame) <= 0.0 ||
-        CGRectGetHeight(frame) <= 0.0) {
+    frame =
+        CGRectInset(
+            frame,
+            -7.0,
+            -4.0
+        );
+
+    void (^changes)(void) = ^{
+        selection.hidden = NO;
+        selection.frame = frame;
+        selection.layer.cornerRadius =
+            CGRectGetHeight(frame) *
+            0.5;
+    };
+
+    if (animated) {
+        [UIView
+            animateWithDuration:0.16
+                     animations:
+                         changes];
+    } else {
+        changes();
+    }
+
+    UIVisualEffectView *rail =
+        objc_getAssociatedObject(
+            root,
+            kYTLGTopTabRailGlassKey
+        );
+
+    if (rail &&
+        rail.superview == root) {
+
+        [root
+            insertSubview:selection
+             aboveSubview:rail];
+    }
+
+    // Keep YouTube's real labels/buttons above both glass layers.
+    [root
+        sendSubviewToBack:
+            selection];
+
+    if (rail) {
+        [root
+            sendSubviewToBack:
+                rail];
+
+        [root
+            insertSubview:selection
+             aboveSubview:rail];
+    }
+}
+
+@interface YTLGTopTabPanHandler : NSObject
+@property(nonatomic, weak) UIView *root;
+@property(nonatomic, weak) UIView *hoveredButton;
+- (void)handlePan:
+    (UIPanGestureRecognizer *)gesture;
+@end
+
+@implementation YTLGTopTabPanHandler
+
+- (void)handlePan:
+    (UIPanGestureRecognizer *)gesture {
+
+    UIView *root =
+        self.root;
+
+    if (!root) return;
+
+    CGPoint point =
+        [gesture
+            locationInView:root];
+
+    UIView *button =
+        YTLGTopTabAtPoint(
+            root,
+            point
+        );
+
+    if (button &&
+        button !=
+            self.hoveredButton) {
+
+        self.hoveredButton =
+            button;
+
+        YTLGMoveTopTabSelectionGlass(
+            root,
+            button,
+            YES
+        );
+    }
+
+    if (gesture.state ==
+            UIGestureRecognizerStateEnded ||
+        gesture.state ==
+            UIGestureRecognizerStateCancelled) {
+
+        UIView *target =
+            self.hoveredButton;
+
+        self.hoveredButton = nil;
+
+        if (gesture.state ==
+                UIGestureRecognizerStateEnded &&
+            target) {
+
+            UIControl *control =
+                YTLGFirstControlInView(
+                    target
+                );
+
+            if (control) {
+                [control
+                    sendActionsForControlEvents:
+                        UIControlEventTouchUpInside];
+            }
+        }
+    }
+}
+
+@end
+
+static void
+YTLGInstallTopTabPanIfNeeded(
+    UIView *root
+) {
+    if (!root) return;
+
+    YTLGTopTabPanHandler *handler =
+        objc_getAssociatedObject(
+            root,
+            kYTLGTopTabPanHandlerKey
+        );
+
+    if (handler) {
         return;
     }
 
-    glass.hidden = NO;
-    glass.frame = frame;
-    glass.layer.cornerRadius =
-        MIN(
-            22.0,
-            CGRectGetHeight(frame) *
-                0.5
-        );
+    handler =
+        [YTLGTopTabPanHandler new];
 
-    // Preserve individual YouTube chip selection states; only replace the rail
-    // backing with one system material.
-    cell.opaque = NO;
-    cell.backgroundColor =
-        UIColor.clearColor;
-    cell.layer.backgroundColor =
-        UIColor.clearColor.CGColor;
+    handler.root =
+        root;
 
-    [cell sendSubviewToBack:glass];
+    UIPanGestureRecognizer *pan =
+        [[UIPanGestureRecognizer alloc]
+            initWithTarget:handler
+                    action:
+                        @selector(handlePan:)];
+
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;
+
+    [root
+        addGestureRecognizer:pan];
+
+    objc_setAssociatedObject(
+        root,
+        kYTLGTopTabPanHandlerKey,
+        handler,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC
+    );
 }
 
-%group YTLiquidGlassTopicRail
+static void
+YTLGUpdateTopTabTitlesGlass(
+    UIView *root
+) {
+    if (!root ||
+        !root.window ||
+        CGRectIsEmpty(root.bounds)) {
+        return;
+    }
 
-%hook YTChipCloudCell
+    NSArray<UIView *> *buttons =
+        YTLGTopTabButtons(
+            root
+        );
+
+    if (buttons.count < 2) {
+        return;
+    }
+
+    CGRect unionFrame =
+        YTLGUnionFramesForViews(
+            buttons,
+            root
+        );
+
+    if (CGRectIsEmpty(unionFrame)) {
+        return;
+    }
+
+    unionFrame =
+        CGRectInset(
+            unionFrame,
+            -10.0,
+            -6.0
+        );
+
+    unionFrame.origin.x =
+        MAX(
+            4.0,
+            unionFrame.origin.x
+        );
+
+    CGFloat maxWidth =
+        CGRectGetWidth(root.bounds) -
+        unionFrame.origin.x -
+        4.0;
+
+    unionFrame.size.width =
+        MIN(
+            unionFrame.size.width,
+            maxWidth
+        );
+
+    UIVisualEffectView *rail =
+        YTLGScopedGlassView(
+            root,
+            kYTLGTopTabRailGlassKey,
+            NO,
+            @"YTLiquidGlass.TopTabRail"
+        );
+
+    rail.hidden = NO;
+    rail.frame =
+        unionFrame;
+    rail.layer.cornerRadius =
+        MIN(
+            24.0,
+            CGRectGetHeight(
+                unionFrame
+            ) * 0.5
+        );
+
+    root.opaque = NO;
+    root.backgroundColor =
+        UIColor.clearColor;
+
+    UIView *selected = nil;
+
+    for (UIView *button
+            in buttons) {
+        if (YTLGViewLooksSelected(
+                button)) {
+            selected = button;
+            break;
+        }
+    }
+
+    if (selected) {
+        YTLGMoveTopTabSelectionGlass(
+            root,
+            selected,
+            NO
+        );
+    } else {
+        YTLGHideScopedGlassIfPresent(
+            root,
+            kYTLGTopTabSelectionGlassKey
+        );
+    }
+
+    [root
+        sendSubviewToBack:
+            rail];
+
+    YTLGInstallTopTabPanIfNeeded(
+        root
+    );
+}
+
+%group YTLiquidGlassTopTabTitles
+
+%hook YTTabTitlesView
 
 - (void)layoutSubviews {
     %orig;
 
-    YTLGUpdateChipRailGlass(
+    YTLGUpdateTopTabTitlesGlass(
         self
     );
 }
@@ -3867,7 +4561,295 @@ YTLGUpdateChipRailGlass(
             dispatch_get_main_queue(),
             ^{
                 if (self.window) {
-                    YTLGUpdateChipRailGlass(
+                    YTLGUpdateTopTabTitlesGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+%end
+
+%end
+
+
+static void
+YTLGUpdateSubscriptionFilterHeaderGlass(
+    UIView *header
+) {
+    if (!header ||
+        !header.window ||
+        header.hidden ||
+        header.alpha <= 0.01 ||
+        CGRectIsEmpty(header.bounds)) {
+        return;
+    }
+
+    CGFloat height =
+        CGRectGetHeight(
+            header.bounds
+        );
+
+    if (height < 70.0 ||
+        height > 260.0) {
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGScopedGlassView(
+            header,
+            kYTLGSubscriptionHeaderGlassKey,
+            NO,
+            @"YTLiquidGlass.SubscriptionFilterHeader"
+        );
+
+    CGRect frame =
+        CGRectInset(
+            header.bounds,
+            8.0,
+            4.0
+        );
+
+    glass.hidden = NO;
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        26.0;
+
+    header.opaque = NO;
+    header.backgroundColor =
+        UIColor.clearColor;
+    header.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    [header
+        sendSubviewToBack:
+            glass];
+}
+
+%group YTLiquidGlassSubscriptionFilterHeader
+
+%hook YTFeedChannelFilterHeaderView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateSubscriptionFilterHeaderGlass(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGUpdateSubscriptionFilterHeaderGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+%end
+
+%end
+
+
+static UICollectionView *
+YTLGChipCollectionForCell(
+    UIView *cell
+) {
+    UIView *cursor =
+        cell.superview;
+
+    for (NSUInteger depth = 0;
+         cursor && depth < 8;
+         depth++, cursor =
+             cursor.superview) {
+
+        if ([cursor
+                isKindOfClass:
+                    UICollectionView.class]) {
+
+            return
+                (UICollectionView *)
+                    cursor;
+        }
+    }
+
+    return nil;
+}
+
+static void
+YTLGClearChipOpaqueBackgrounds(
+    UIView *view,
+    UIView *root
+) {
+    if (!view) return;
+
+    if (view != root) {
+        CGFloat height =
+            CGRectGetHeight(
+                view.bounds
+            );
+
+        CGFloat width =
+            CGRectGetWidth(
+                view.bounds
+            );
+
+        if (height >= 26.0 &&
+            height <= 56.0 &&
+            width >= 36.0 &&
+            width <= 220.0 &&
+            view.layer.cornerRadius >=
+                6.0) {
+
+            view.opaque = NO;
+            view.backgroundColor =
+                UIColor.clearColor;
+            view.layer.backgroundColor =
+                UIColor.clearColor.CGColor;
+        }
+    }
+
+    for (UIView *subview
+            in view.subviews) {
+        YTLGClearChipOpaqueBackgrounds(
+            subview,
+            root
+        );
+    }
+}
+
+static void
+YTLGUpdateChipCellAndRailGlass(
+    UIView *cell
+) {
+    if (!cell ||
+        !cell.window ||
+        cell.hidden ||
+        cell.alpha <= 0.01 ||
+        CGRectIsEmpty(cell.bounds)) {
+        return;
+    }
+
+    UICollectionView *collection =
+        YTLGChipCollectionForCell(
+            cell
+        );
+
+    if (!collection ||
+        CGRectGetHeight(
+            collection.bounds) <
+            28.0 ||
+        CGRectGetHeight(
+            collection.bounds) >
+            90.0) {
+        return;
+    }
+
+    UIVisualEffectView *rail =
+        YTLGScopedGlassView(
+            collection,
+            kYTLGChipCollectionGlassKey,
+            NO,
+            @"YTLiquidGlass.TopicRail"
+        );
+
+    rail.hidden = NO;
+    rail.frame =
+        CGRectInset(
+            collection.bounds,
+            4.0,
+            2.0
+        );
+    rail.layer.cornerRadius =
+        MIN(
+            22.0,
+            CGRectGetHeight(
+                rail.frame
+            ) * 0.5
+        );
+
+    collection.opaque = NO;
+    collection.backgroundColor =
+        UIColor.clearColor;
+
+    [collection
+        sendSubviewToBack:
+            rail];
+
+    YTLGClearChipOpaqueBackgrounds(
+        cell,
+        cell
+    );
+
+    BOOL selected =
+        YTLGViewLooksSelected(
+            cell
+        );
+
+    if (selected) {
+        UIVisualEffectView *lens =
+            YTLGScopedGlassView(
+                cell,
+                kYTLGChipSelectedGlassKey,
+                YES,
+                @"YTLiquidGlass.TopicSelection"
+            );
+
+        lens.hidden = NO;
+        lens.frame =
+            CGRectInset(
+                cell.bounds,
+                2.0,
+                2.0
+            );
+        lens.layer.cornerRadius =
+            CGRectGetHeight(
+                lens.frame
+            ) * 0.5;
+
+        [cell
+            sendSubviewToBack:
+                lens];
+    } else {
+        YTLGHideScopedGlassIfPresent(
+            cell,
+            kYTLGChipSelectedGlassKey
+        );
+    }
+}
+
+%group YTLiquidGlassTopicRail
+
+%hook YTChipCloudCell
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateChipCellAndRailGlass(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGUpdateChipCellAndRailGlass(
                         self
                     );
                 }
@@ -4102,6 +5084,18 @@ YTLGStyleYTKACEStandaloneControls(
             NSClassFromString(@"YTChipCloudCell")) {
 
             %init(YTLiquidGlassTopicRail);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTTabTitlesView")) {
+
+            %init(YTLiquidGlassTopTabTitles);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTFeedChannelFilterHeaderView")) {
+
+            %init(YTLiquidGlassSubscriptionFilterHeader);
         }
 
         if (NSClassFromString(@"UIGlassEffect") &&
