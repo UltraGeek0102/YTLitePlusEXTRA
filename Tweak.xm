@@ -1,4 +1,4 @@
-// YTLiquidGlass vNext — native secondary rails + compact comment controls + glass panels
+// YTLiquidGlass vNext — secondary rail input/lifecycle fixes; comments left stock
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -3418,7 +3418,7 @@ static BOOL YTLGTryPresentNativeSheetMenu(
 //   • channel/profile CTA buttons
 //   • You/Profile page standalone CTA buttons
 //   • Accounts/profile header action
-//   • comment sort/filter/send controls
+//   • comment controls and panels remain stock
 //   • compact search-filter control
 //   • create/upload action rows when rendered as Elements views
 //   • one-piece glass behind the top topic/category chip rail
@@ -3640,6 +3640,9 @@ YTLGScopedSurfaceKindForElementsView(
         return YTLGScopedSurfaceNone;
     }
 
+    if (YTLGViewOrAncestorContainsAny(view, @[@"comment"]))
+        return YTLGScopedSurfaceNone;
+
     NSString *label =
         YTLGTrimmedLowerLabel(view);
 
@@ -3731,48 +3734,6 @@ YTLGScopedSurfaceKindForElementsView(
 
         return
             YTLGScopedSurfaceProminent;
-    }
-
-    // ---- Comment controls ----
-    //
-    // Only compact controls inside a comment hierarchy. Small inline "Reply"
-    // text links are below the 28pt minimum and therefore remain untouched.
-    BOOL commentContext =
-        YTLGViewOrAncestorContainsAny(
-            view,
-            @[
-                @"comment",
-                @"comments"
-            ]
-        );
-
-    if (commentContext &&
-        YTLGViewHasCompactActionGeometry(
-            view,
-            28.0,
-            180.0) &&
-        ([token containsString:@"sort"] ||
-         [token containsString:@"filter"] ||
-         [token containsString:@"send"] ||
-         [token containsString:@"reply"] ||
-         [token containsString:@"dislike"] ||
-         [token containsString:@"like"])) {
-
-        // Elements may repeat a button's accessibility label on nested
-        // wrappers. Style one owner, preventing multiple stacked glass discs.
-        for (UIView *parent = view.superview; parent && parent != view.window;
-             parent = parent.superview) {
-            if (CGRectGetHeight(parent.bounds) > 68 || CGRectGetWidth(parent.bounds) > 180) break;
-            if (label.length && [YTLGTrimmedLowerLabel(parent) isEqualToString:label])
-                return YTLGScopedSurfaceNone;
-        }
-        // Preserve the action's full hit area; size the visible glass below.
-        return ([token containsString:@"like"] ||
-                [token containsString:@"dislike"] ||
-                [token containsString:@"reply"] ||
-                [token containsString:@"send"])
-            ? YTLGScopedSurfaceCompactCircle
-            : YTLGScopedSurfaceRegular;
     }
 
     // ---- Search filter button ----
@@ -3878,7 +3839,7 @@ YTLGScopedGlassView(
         [glass removeFromSuperview];
         [owner insertSubview:glass
                      atIndex:0];
-    } else {
+    } else if (owner.subviews.firstObject != glass) {
         [owner sendSubviewToBack:glass];
     }
 
@@ -3917,25 +3878,6 @@ YTLGHideScopedGlassIfPresent(
     }
 }
 
-// Measure rendered icon/text together so a like count stays inside its pill.
-static CGRect YTLGCommentContentBounds(UIView *view, UIView *root, NSUInteger depth) {
-    if (!view || depth > 6 || view.hidden || view.alpha <= 0.01 ||
-        [view.accessibilityIdentifier hasPrefix:@"YTLiquidGlass."]) return CGRectNull;
-    if (view != root && ([view isKindOfClass:UILabel.class] ||
-                        [view isKindOfClass:UIImageView.class])) {
-        return [view convertRect:view.bounds toView:root];
-    }
-    CGRect result = CGRectNull;
-    for (UIView *child in view.subviews)
-        result = CGRectUnion(result, YTLGCommentContentBounds(child, root, depth + 1));
-    // Texture/Elements often draws glyphs without UIImageView/UILabel.
-    if (CGRectIsNull(result) && view != root && view.subviews.count == 0 &&
-        CGRectGetWidth(view.bounds) >= 6 && CGRectGetWidth(view.bounds) <= 80 &&
-        CGRectGetHeight(view.bounds) >= 10 && CGRectGetHeight(view.bounds) <= 28)
-        return [view convertRect:view.bounds toView:root];
-    return result;
-}
-
 static void
 YTLGApplyScopedElementsGlass(
     UIView *view
@@ -3970,21 +3912,7 @@ YTLGApplyScopedElementsGlass(
     CGRect bounds =
         view.bounds;
 
-    BOOL commentControl = YTLGViewOrAncestorContainsAny(view, @[@"comment"]);
-    if (commentControl) {
-        CGRect content = YTLGCommentContentBounds(view, view, 0);
-        if (CGRectIsNull(content) || CGRectIsEmpty(content)) {
-            // Some Elements nodes draw directly into their layer. Include the
-            // complete control width rather than centering a disc over a count.
-            content = CGRectInset(bounds, 4, MAX(0, (CGRectGetHeight(bounds)-20)/2));
-        }
-        CGFloat h = MIN(26, CGRectGetHeight(bounds));
-        CGFloat w = MIN(CGRectGetWidth(bounds), MAX(h, CGRectGetWidth(content)+10));
-        CGFloat x = MAX(CGRectGetMinX(bounds), MIN(CGRectGetMidX(content)-w/2,
-                                                 CGRectGetMaxX(bounds)-w));
-        glass.frame = CGRectMake(x, CGRectGetMidY(bounds)-h/2, w, h);
-        glass.layer.cornerRadius = h/2;
-    } else if (kind ==
+    if (kind ==
         YTLGScopedSurfaceCompactCircle) {
 
         CGFloat side = MIN(42.0,
@@ -4096,22 +4024,61 @@ static BOOL YTLGIsOurView(UIView *view) {
     return [view.accessibilityIdentifier hasPrefix:@"YTLiquidGlass."];
 }
 
-static NSString *YTLGRailTitle(UIView *view, NSUInteger depth) {
+static NSString *YTLGCleanRailLabel(NSString *label) {
+    if (!label.length) return nil;
+    static NSRegularExpression *positionSuffix;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        positionSuffix = [NSRegularExpression regularExpressionWithPattern:
+            @"\\s*[,，]?\\s*(?:tab|button)\\s+[0-9]+\\s+(?:of|/)\\s+[0-9]+.*$"
+            options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    NSString *text = [positionSuffix stringByReplacingMatchesInString:label options:0
+        range:NSMakeRange(0, label.length) withTemplate:@""];
+    text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return text.length && text.length < 80 ? text : nil;
+}
+
+static NSString *YTLGRailVisibleText(UIView *view, NSUInteger depth) {
     if (!view || depth > 5 || YTLGIsOurView(view)) return nil;
-    if ([view isKindOfClass:UILabel.class]) {
-        NSString *text = ((UILabel *)view).text;
-        if (text.length) return text;
-    }
-    if ([view isKindOfClass:UIButton.class]) {
-        NSString *text = ((UIButton *)view).currentTitle;
-        if (text.length) return text;
-    }
+    if ([view isKindOfClass:UILabel.class] && ((UILabel *)view).text.length)
+        return ((UILabel *)view).text;
+    if ([view isKindOfClass:UIButton.class] && ((UIButton *)view).currentTitle.length)
+        return ((UIButton *)view).currentTitle;
     for (UIView *child in view.subviews) {
-        NSString *text = YTLGRailTitle(child, depth + 1);
+        NSString *text = YTLGRailVisibleText(child, depth + 1);
         if (text.length) return text;
     }
-    NSString *label = view.accessibilityLabel;
-    return label.length && label.length < 80 ? label : nil;
+    return nil;
+}
+
+static NSString *YTLGRailAccessibleText(UIView *view, NSUInteger depth) {
+    if (!view || depth > 5 || YTLGIsOurView(view)) return nil;
+    NSString *text = YTLGCleanRailLabel(view.accessibilityLabel);
+    if (text.length) return text;
+    for (UIView *child in view.subviews) {
+        text = YTLGRailAccessibleText(child, depth + 1);
+        if (text.length) return text;
+    }
+    return nil;
+}
+
+static NSString *YTLGRailTitle(UIView *view, NSUInteger depth) {
+    return YTLGCleanRailLabel(YTLGRailVisibleText(view, depth)) ?:
+        YTLGRailAccessibleText(view, depth);
+}
+
+static UIImage *YTLGRailSourceImage(UIView *view, NSUInteger depth) {
+    if (!view || depth > 5 || YTLGIsOurView(view)) return nil;
+    UIImage *image = nil;
+    if ([view isKindOfClass:UIButton.class]) image = ((UIButton *)view).currentImage;
+    else if ([view isKindOfClass:UIImageView.class]) image = ((UIImageView *)view).image;
+    if (image) return image;
+    for (UIView *child in view.subviews) {
+        image = YTLGRailSourceImage(child, depth + 1);
+        if (image) return image;
+    }
+    return nil;
 }
 
 static UIControl *YTLGRailActionControl(UIView *view) {
@@ -4129,9 +4096,127 @@ static UIControl *YTLGRailActionControl(UIView *view) {
     return nil;
 }
 
+// Texture's control nodes are not UIControls. Use their actual registered
+// target/action event instead of a collection delegate that may be a no-op.
+static id YTLGObjectGetter(id object, NSString *name) {
+    SEL selector = NSSelectorFromString(name);
+    if (![object respondsToSelector:selector]) return nil;
+    NSMethodSignature *signature = [object methodSignatureForSelector:selector];
+    if (signature.numberOfArguments != 2 || signature.methodReturnType[0] != '@') return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(object, selector);
+}
+
+static id YTLGTextureNode(UIView *view) {
+    id node = YTLGObjectGetter(view, @"asyncdisplaykit_node");
+    if (!node && [NSStringFromClass(view.class) containsString:@"AS"])
+        node = YTLGObjectGetter(view, @"node");
+    return node;
+}
+
+static NSUInteger YTLGTextureActionEvent(id node) {
+    Class controlClass = NSClassFromString(@"ASControlNode");
+    if (!controlClass || ![node isKindOfClass:controlClass]) return 0;
+    SEL actionsSelector = NSSelectorFromString(@"actionsForTarget:forControlEvent:");
+    if (![node respondsToSelector:actionsSelector] ||
+        ![node respondsToSelector:NSSelectorFromString(@"sendActionsForControlEvents:withEvent:")]) return 0;
+    if ([node respondsToSelector:@selector(isEnabled)] &&
+        !((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isEnabled))) return 0;
+    NSSet *targets = YTLGObjectGetter(node, @"allTargets");
+    if (![targets isKindOfClass:NSSet.class]) return 0;
+    // ASControlNodeEventTouchUpInside is 1<<4, NOT UIKit's 1<<6.
+    const NSUInteger events[] = { 1UL << 4, 1UL << 13 };
+    for (NSUInteger i = 0; i < 2; i++) {
+        for (id target in targets) {
+            if (target == NSNull.null) continue;
+            NSArray *actions = ((id (*)(id, SEL, id, NSUInteger))objc_msgSend)
+                (node, actionsSelector, target, events[i]);
+            if ([actions isKindOfClass:NSArray.class] && actions.count) return events[i];
+        }
+    }
+    return 0;
+}
+
+static id YTLGFindActionInNode(id node, NSUInteger depth) {
+    if (!node || depth > 6) return nil;
+    if (YTLGTextureActionEvent(node)) return node;
+    NSArray *children = YTLGObjectGetter(node, @"subnodes");
+    if ([children isKindOfClass:NSArray.class]) {
+        for (id child in children) {
+            id action = YTLGFindActionInNode(child, depth + 1);
+            if (action) return action;
+        }
+    }
+    return nil;
+}
+
+static id YTLGFindTextureAction(UIView *view, NSUInteger depth) {
+    if (!view || depth > 6 || YTLGIsOurView(view)) return nil;
+    id node = YTLGFindActionInNode(YTLGTextureNode(view), 0);
+    if (node) return node;
+    for (UIView *child in view.subviews) {
+        id action = YTLGFindTextureAction(child, depth + 1);
+        if (action) return action;
+    }
+    return nil;
+}
+
+static UIView *YTLGAccessibilityActionSource(UIView *view, NSUInteger depth) {
+    if (!view || depth > 6 || YTLGIsOurView(view)) return nil;
+    // Prefer a descendant Elements control over the collection cell wrapper.
+    for (UIView *child in view.subviews) {
+        UIView *source = YTLGAccessibilityActionSource(child, depth + 1);
+        if (source) return source;
+    }
+    if (![view isKindOfClass:UICollectionViewCell.class] &&
+        class_getMethodImplementation(view.class, @selector(accessibilityActivate)) !=
+        class_getMethodImplementation(UIView.class, @selector(accessibilityActivate))) return view;
+    return nil;
+}
+
+static BOOL YTLGCanActivateRailSource(UIView *source) {
+    return YTLGRailActionControl(source) || YTLGFindTextureAction(source, 0) ||
+        YTLGAccessibilityActionSource(source, 0);
+}
+
+static BOOL YTLGActivateAccessibilityTree(UIView *view, NSUInteger depth) {
+    if (!view || depth > 6 || YTLGIsOurView(view)) return NO;
+    BOOL custom = ![view isKindOfClass:UICollectionViewCell.class] &&
+        class_getMethodImplementation(view.class, @selector(accessibilityActivate)) !=
+        class_getMethodImplementation(UIView.class, @selector(accessibilityActivate));
+    BOOL button = (view.accessibilityTraits & UIAccessibilityTraitButton) != 0;
+    if (custom && button && [view accessibilityActivate]) return YES;
+    for (UIView *child in view.subviews)
+        if (YTLGActivateAccessibilityTree(child, depth + 1)) return YES;
+    return custom && !button ? [view accessibilityActivate] : NO;
+}
+
+static BOOL YTLGActivateRailSource(UIView *source) {
+    UIControl *control = YTLGRailActionControl(source);
+    if (control) {
+        if (!control.enabled) return NO;
+        UIControlEvents events = control.allControlEvents;
+        UIControlEvents event = (events & UIControlEventTouchUpInside) ? UIControlEventTouchUpInside :
+            ((events & UIControlEventPrimaryActionTriggered) ? UIControlEventPrimaryActionTriggered :
+                                                               UIControlEventValueChanged);
+        [control sendActionsForControlEvents:event];
+        return YES;
+    }
+    id node = YTLGFindTextureAction(source, 0);
+    NSUInteger event = YTLGTextureActionEvent(node);
+    if (event) {
+        ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(node,
+            NSSelectorFromString(@"sendActionsForControlEvents:withEvent:"), event, nil);
+        return YES;
+    }
+    return YTLGActivateAccessibilityTree(source, 0);
+}
+
 static BOOL YTLGSourceSelected(UIView *view, NSUInteger depth) {
     if (!view || depth > 4 || YTLGIsOurView(view)) return NO;
     if ((view.accessibilityTraits & UIAccessibilityTraitSelected) != 0) return YES;
+    id node = YTLGTextureNode(view);
+    if ([node respondsToSelector:@selector(isSelected)] &&
+        ((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isSelected))) return YES;
     if ([view isKindOfClass:UIControl.class] && ((UIControl *)view).selected) return YES;
     if ([view isKindOfClass:UICollectionViewCell.class] &&
         ((UICollectionViewCell *)view).selected) return YES;
@@ -4152,8 +4237,13 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
 @property(nonatomic, copy) NSArray<UIView *> *sourceViews;
 @property(nonatomic, copy) NSArray<NSIndexPath *> *sourcePaths;
 @property(nonatomic, copy) NSArray<NSString *> *sourceTitles;
+@property(nonatomic, copy) NSArray *sourceImages;
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *suppressedViews;
 @property(nonatomic, strong) NSMapTable<CALayer *, NSNumber *> *suppressedLayers;
+@property(nonatomic, strong) NSMapTable<UIScrollView *, NSNumber *> *scrollCancellation;
+@property(nonatomic, assign) CGPoint trackingOrigin;
+@property(nonatomic, assign) NSInteger trackingOriginalIndex;
+@property(nonatomic, assign) BOOL yieldingToScroll;
 @property(nonatomic, assign) CFTimeInterval pendingUntil;
 - (void)restoreSources;
 - (void)suppress:(UIView *)view;
@@ -4165,8 +4255,11 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
     if ((self = [super initWithFrame:frame])) {
         self.accessibilityIdentifier = @"YTLiquidGlass.NativeSecondaryRail";
         self.apportionsSegmentWidthsByContent = YES;
+        [self setTitleTextAttributes:@{NSFontAttributeName:
+            [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]} forState:UIControlStateNormal];
         self.suppressedViews = [NSMapTable weakToStrongObjectsMapTable];
         self.suppressedLayers = [NSMapTable weakToStrongObjectsMapTable];
+        self.scrollCancellation = [NSMapTable weakToStrongObjectsMapTable];
         [self addTarget:self action:@selector(selectionChanged)
             forControlEvents:UIControlEventValueChanged];
         // Leave background/selected tint images unset: UIKit supplies the
@@ -4178,7 +4271,26 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
     if (!view || view == self || YTLGIsOurView(view)) return;
     if (![self.suppressedViews objectForKey:view])
         [self.suppressedViews setObject:@(view.alpha) forKey:view];
-    view.alpha = 0;
+    if (view.alpha != 0) view.alpha = 0;
+}
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    self.trackingOrigin = [touch locationInView:self];
+    self.trackingOriginalIndex = self.selectedSegmentIndex;
+    self.yieldingToScroll = NO;
+    return [super beginTrackingWithTouch:touch withEvent:event];
+}
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    CGPoint point = [touch locationInView:self];
+    CGFloat dx = fabs(point.x - self.trackingOrigin.x);
+    CGFloat dy = fabs(point.y - self.trackingOrigin.y);
+    if (dy > 10 && dy > dx * 1.2) {
+        self.yieldingToScroll = YES;
+        [super cancelTrackingWithEvent:event];
+        self.selectedSegmentIndex = self.trackingOriginalIndex;
+        self.pendingUntil = 0;
+        return NO;
+    }
+    return [super continueTrackingWithTouch:touch withEvent:event];
 }
 - (void)restoreSources {
     for (UIView *view in self.suppressedViews.keyEnumerator)
@@ -4187,44 +4299,26 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
     for (CALayer *layer in self.suppressedLayers.keyEnumerator)
         layer.opacity = [[self.suppressedLayers objectForKey:layer] floatValue];
     [self.suppressedLayers removeAllObjects];
+    for (UIScrollView *scroll in self.scrollCancellation.keyEnumerator)
+        scroll.canCancelContentTouches = [[self.scrollCancellation objectForKey:scroll] boolValue];
+    [self.scrollCancellation removeAllObjects];
 }
 - (void)selectionChanged {
+    if (self.yieldingToScroll) return;
     NSInteger index = self.selectedSegmentIndex;
     if (index < 0 || index >= (NSInteger)self.sourceViews.count) return;
     UIView *source = self.sourceViews[index];
     BOOL sent = NO;
     self.pendingUntil = CACurrentMediaTime() + 0.45;
-    // Collection delegates are the source of truth for chip selection; a
-    // reusable cell's index is captured when the native segments are built.
     UICollectionView *collection = self.sourceCollection;
-    if (collection && index < (NSInteger)self.sourcePaths.count) {
-        NSIndexPath *path = self.sourcePaths[index];
-        id<UICollectionViewDelegate> delegate = collection.delegate;
-        if (path.section < [collection numberOfSections] &&
-            path.item < [collection numberOfItemsInSection:path.section] &&
-            [delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-            BOOL allowed = ![delegate respondsToSelector:@selector(collectionView:shouldSelectItemAtIndexPath:)] ||
-                [delegate collectionView:collection shouldSelectItemAtIndexPath:path];
-            if (allowed) {
-                [collection selectItemAtIndexPath:path animated:NO
-                    scrollPosition:UICollectionViewScrollPositionNone];
-                [delegate collectionView:collection didSelectItemAtIndexPath:path];
-                sent = YES;
-            }
-        }
-    } else {
-        UIControl *control = YTLGRailActionControl(source);
-        if (control) {
-            UIControlEvents events = control.allControlEvents;
-            UIControlEvents event = (events & UIControlEventTouchUpInside)
-                ? UIControlEventTouchUpInside : ((events & UIControlEventPrimaryActionTriggered)
-                ? UIControlEventPrimaryActionTriggered : UIControlEventValueChanged);
-            [control sendActionsForControlEvents:event];
-            sent = YES;
-        } else {
-            sent = [source accessibilityActivate];
-        }
+    BOOL current = YES;
+    if (collection) {
+        NSIndexPath *currentPath = [source isKindOfClass:UICollectionViewCell.class]
+            ? [collection indexPathForCell:(UICollectionViewCell *)source] : nil;
+        current = index < (NSInteger)self.sourcePaths.count && currentPath &&
+            [currentPath isEqual:self.sourcePaths[index]];
     }
+    if (current) sent = YTLGActivateRailSource(source);
     if (!sent) {
         // A changed YouTube hierarchy must leave the original controls usable.
         [self restoreSources];
@@ -4282,13 +4376,27 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
         [rail restoreSources]; rail.hidden = YES; return;
     }
     NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    NSMutableArray *images = [NSMutableArray array];
     NSMutableArray<NSIndexPath *> *paths = [NSMutableArray array];
     CGRect unionFrame = CGRectNull;
     NSInteger selected = UISegmentedControlNoSegment;
     for (UIView *source in sources) {
         NSString *title = YTLGRailTitle(source, 0);
-        if (!title.length) { [rail restoreSources]; rail.hidden = YES; return; }
-        [titles addObject:title];
+        BOOL explore = [title.lowercaseString isEqualToString:@"explore"];
+        UIImage *image = nil;
+        if (explore) {
+            static UIImage *compass;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                compass = [UIImage systemImageNamed:@"safari" withConfiguration:
+                    [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular]];
+                compass.accessibilityLabel = @"Explore";
+            });
+            image = compass;
+        } else if (!title.length) image = YTLGRailSourceImage(source, 0);
+        if (!title.length && !image) { [rail restoreSources]; rail.hidden = YES; return; }
+        [titles addObject:title ?: @""];
+        [images addObject:image ?: (id)NSNull.null];
         unionFrame = CGRectUnion(unionFrame, [source convertRect:source.bounds toView:root]);
         if (YTLGSourceSelected(source, 0)) selected = titles.count - 1;
         if (collection) {
@@ -4296,9 +4404,8 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
                 ? [collection indexPathForCell:(UICollectionViewCell *)source] : nil;
             if (!path) { [rail restoreSources]; rail.hidden = YES; return; }
             [paths addObject:path];
-        } else if (!YTLGRailActionControl(source) &&
-            class_getMethodImplementation(source.class, @selector(accessibilityActivate)) ==
-            class_getMethodImplementation(UIView.class, @selector(accessibilityActivate))) {
+        }
+        if (!YTLGCanActivateRailSource(source)) {
             [rail restoreSources]; rail.hidden = YES; return;
         }
     }
@@ -4334,46 +4441,82 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
         [root addSubview:rail];
         objc_setAssociatedObject(root, kYTLGNativeRailKey, rail, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    BOOL changed = ![rail.sourceTitles isEqualToArray:titles];
-    [rail restoreSources];
+    BOOL changed = ![rail.sourceTitles isEqualToArray:titles] ||
+        ![rail.sourceImages isEqualToArray:images];
+    // Restore only views that left this rail. Toggling every source's alpha
+    // on every layout pass can trigger a new layout while the feed is scrolling.
+    NSMutableSet *keptViews = [NSMutableSet setWithArray:sources];
+    [keptViews addObjectsFromArray:indicators];
+    for (UIView *oldView in rail.suppressedViews.keyEnumerator.allObjects) {
+        if (![keptViews containsObject:oldView]) {
+            oldView.alpha = [[rail.suppressedViews objectForKey:oldView] doubleValue];
+            [rail.suppressedViews removeObjectForKey:oldView];
+        }
+    }
+    for (CALayer *oldLayer in rail.suppressedLayers.keyEnumerator.allObjects) {
+        if (![indicatorLayers containsObject:oldLayer]) {
+            oldLayer.opacity = [[rail.suppressedLayers objectForKey:oldLayer] floatValue];
+            [rail.suppressedLayers removeObjectForKey:oldLayer];
+        }
+    }
+    for (UIView *parent = root; parent; parent = parent.superview) {
+        if ([parent isKindOfClass:UIScrollView.class]) {
+            UIScrollView *scroll = (UIScrollView *)parent;
+            if (!scroll.canCancelContentTouches) {
+                if (![rail.scrollCancellation objectForKey:scroll])
+                    [rail.scrollCancellation setObject:@NO forKey:scroll];
+                scroll.canCancelContentTouches = YES;
+            }
+        }
+    }
     rail.sourceViews = sources; rail.sourcePaths = paths; rail.sourceCollection = collection;
     if (changed) {
         [rail removeAllSegments];
-        for (NSUInteger i = 0; i < titles.count; i++)
-            [rail insertSegmentWithTitle:titles[i] atIndex:i animated:NO];
-        rail.sourceTitles = titles;
+        for (NSUInteger i = 0; i < titles.count; i++) {
+            if ([images[i] isKindOfClass:UIImage.class])
+                [rail insertSegmentWithImage:images[i] atIndex:i animated:NO];
+            else [rail insertSegmentWithTitle:titles[i] atIndex:i animated:NO];
+        }
+        rail.sourceTitles = titles; rail.sourceImages = images;
     }
-    if (changed || CACurrentMediaTime() >= rail.pendingUntil)
+    if ((changed || CACurrentMediaTime() >= rail.pendingUntil) && rail.selectedSegmentIndex != selected)
         rail.selectedSegmentIndex = selected;
-    CGFloat height = MIN(36.0, CGRectGetHeight(root.bounds) - 4.0);
+    CGFloat height = MIN(34.0, CGRectGetHeight(root.bounds) - 6.0);
     if (height < 24.0) { rail.hidden = YES; return; }
     // A collection owns its scrolling/content coordinates. Its visible cells
     // become a native segment strip; offscreen cells are never dequeued by us.
     CGRect frame = CGRectMake(CGRectGetMinX(unionFrame),
         CGRectGetMidY(unionFrame) - height / 2.0, CGRectGetWidth(unionFrame), height);
     if (!collection) {
-        frame.origin.x = MAX(CGRectGetMinX(root.bounds) + 4, frame.origin.x);
-        frame.size.width = MIN(frame.size.width, CGRectGetMaxX(root.bounds) - frame.origin.x - 4);
+        frame.origin.x = MAX(CGRectGetMinX(root.bounds) + 8, frame.origin.x);
+        frame.size.width = MIN(frame.size.width, CGRectGetMaxX(root.bounds) - frame.origin.x - 8);
+        frame.origin.y = MAX(CGRectGetMinY(root.bounds)+3,
+            MIN(frame.origin.y, CGRectGetMaxY(root.bounds)-height-3));
     }
     if (!CGRectEqualToRect(rail.frame, frame)) rail.frame = frame;
     for (NSUInteger i = 0; i < sources.count; i++) {
         CGRect f = [sources[i] convertRect:sources[i].bounds toView:root];
         // Preserve each source's geometry in the virtualized collection.
-        if (collection) [rail setWidth:CGRectGetWidth(f) forSegmentAtIndex:i];
+        CGFloat width = collection ? CGRectGetWidth(f) :
+            ([images[i] isKindOfClass:UIImage.class] ? 34 : 0);
+        if (fabs([rail widthForSegmentAtIndex:i] - width) > 0.5)
+            [rail setWidth:width forSegmentAtIndex:i];
         UIControl *action = collection ? nil : YTLGRailActionControl(sources[i]);
         BOOL enabled = action ? action.enabled :
             ((sources[i].accessibilityTraits & UIAccessibilityTraitNotEnabled) == 0);
-        [rail setEnabled:enabled forSegmentAtIndex:i];
+        if ([rail isEnabledForSegmentAtIndex:i] != enabled)
+            [rail setEnabled:enabled forSegmentAtIndex:i];
         [rail suppress:sources[i]];
     }
     for (UIView *indicator in indicators) [rail suppress:indicator];
     for (CALayer *layer in indicatorLayers) {
-        [rail.suppressedLayers setObject:@(layer.opacity) forKey:layer];
-        layer.opacity = 0;
+        if (![rail.suppressedLayers objectForKey:layer])
+            [rail.suppressedLayers setObject:@(layer.opacity) forKey:layer];
+        if (layer.opacity != 0) layer.opacity = 0;
     }
     rail.hidden = NO;
     root.opaque = NO; root.backgroundColor = UIColor.clearColor;
-    [root bringSubviewToFront:rail];
+    if (root.subviews.lastObject != rail) [root bringSubviewToFront:rail];
 }
 
 static const void *kYTLGNativeRailUpdatingKey = &kYTLGNativeRailUpdatingKey;
@@ -4394,6 +4537,51 @@ static void YTLGUpdateTopTabTitlesGlass(UIView *root) {
         return ax < bx ? NSOrderedAscending : ax > bx ? NSOrderedDescending : NSOrderedSame;
     }];
     YTLGUpdateNativeRail(root, sources, nil);
+}
+
+static const void *kYTLGTopRailQueuedKey = &kYTLGTopRailQueuedKey;
+static const void *kYTLGTopRailSettleTokenKey = &kYTLGTopRailSettleTokenKey;
+
+static void YTLGQueueTopRail(UIView *root) {
+    if (!root || [objc_getAssociatedObject(root, kYTLGTopRailQueuedKey) boolValue] ||
+        [objc_getAssociatedObject(root, kYTLGNativeRailUpdatingKey) boolValue]) return;
+    objc_setAssociatedObject(root, kYTLGTopRailQueuedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weakRoot = root;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *liveRoot = weakRoot;
+        if (!liveRoot) return;
+        objc_setAssociatedObject(liveRoot, kYTLGTopRailQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (liveRoot.window) YTLGUpdateTopTabTitlesGlass(liveRoot);
+    });
+}
+
+static void YTLGQueueAncestorTopRail(UIView *view) {
+    Class titlesClass = NSClassFromString(@"YTTabTitlesView");
+    if (!titlesClass) return;
+    UIView *ancestor = view.superview;
+    for (NSUInteger depth = 0; ancestor && depth < 12; depth++, ancestor = ancestor.superview) {
+        if ([ancestor isKindOfClass:titlesClass]) { YTLGQueueTopRail(ancestor); break; }
+    }
+}
+
+static void YTLGSettleTopRail(UIView *root) {
+    if (!root.window) {
+        objc_setAssociatedObject(root, kYTLGTopRailSettleTokenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    NSObject *token = [NSObject new];
+    objc_setAssociatedObject(root, kYTLGTopRailSettleTokenKey, token, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weakRoot = root;
+    // Cold launch creates titles, icons and action targets on separate passes.
+    // Bounded retries stop after startup; there is no background polling timer.
+    for (NSNumber *delay in @[@0.0, @0.08, @0.25, @0.7, @1.5, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                UIView *liveRoot = weakRoot;
+                if (liveRoot.window && objc_getAssociatedObject(liveRoot, kYTLGTopRailSettleTokenKey) == token)
+                    YTLGUpdateTopTabTitlesGlass(liveRoot);
+            });
+    }
 }
 
 static BOOL YTLGContainsLargeImage(UIView *view, NSUInteger depth) {
@@ -4428,6 +4616,9 @@ static void YTLGResetNativeRail(UIView *root) {
 
 static void YTLGUpdateChipCollection(UICollectionView *collection, BOOL knownChip) {
     if (!collection.window || collection.hidden) return;
+    if (YTLGViewOrAncestorContainsAny(collection, @[@"comment"])) {
+        YTLGResetNativeRail(collection); return;
+    }
     CGFloat height = CGRectGetHeight(collection.bounds);
     if (height < 26 || height > 70) { YTLGResetNativeRail(collection); return; }
     BOOL context = knownChip || YTLGViewOrAncestorContainsAny(collection,
@@ -4450,9 +4641,6 @@ static void YTLGUpdateChipCollection(UICollectionView *collection, BOOL knownChi
     for (UIView *cell in cells) if (YTLGContainsLargeImage(cell, 0)) {
         YTLGResetNativeRail(collection); return;
     }
-    if (![collection.delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-        YTLGResetNativeRail(collection); return;
-    }
     YTLGUpdateNativeRail(collection, cells, collection);
 }
 
@@ -4467,8 +4655,7 @@ static void YTLGClearSurfaceFills(UIView *view, UIView *root, NSUInteger depth,
                                 NSMapTable<UIView *, UIColor *> *colors) {
     if (depth > 10 || YTLGIsOurView(view) || [view isKindOfClass:UIVisualEffectView.class] ||
         [view isKindOfClass:UIImageView.class] || [view isKindOfClass:UIControl.class]) return;
-    if (view == root || (CGRectGetWidth(view.bounds) > CGRectGetWidth(root.bounds)*0.65 &&
-                        CGRectGetHeight(view.bounds) > 24)) {
+    if (view == root || (CGRectGetWidth(view.bounds) > 24 && CGRectGetHeight(view.bounds) > 24)) {
         if (YTLGNeutralSurface(view.backgroundColor)) {
             if (![colors objectForKey:view]) [colors setObject:view.backgroundColor forKey:view];
             view.backgroundColor = UIColor.clearColor;
@@ -4482,7 +4669,7 @@ static void YTLGRestoreSurface(UIView *view) {
     for (UIView *child in colors.keyEnumerator) child.backgroundColor = [colors objectForKey:child];
     [colors removeAllObjects];
 }
-static void YTLGApplyPanelGlass(UIView *view, CGFloat radius) {
+static void YTLGApplySubscriptionGlass(UIView *view, CGFloat radius) {
     NSMapTable *colors = objc_getAssociatedObject(view, kYTLGSurfaceColorsKey);
     if (!colors) {
         colors = [NSMapTable weakToStrongObjectsMapTable];
@@ -4490,48 +4677,54 @@ static void YTLGApplyPanelGlass(UIView *view, CGFloat radius) {
     }
     YTLGClearSurfaceFills(view, view, 0, colors);
     UIVisualEffectView *glass = YTLGScopedGlassView(view, kYTLGSurfaceGlassKey,
-        NO, @"YTLiquidGlass.CommentsOrSubscriptionSurface");
-    glass.frame = view.bounds; glass.layer.cornerRadius = radius; glass.hidden = NO;
-    [view sendSubviewToBack:glass];
+        NO, @"YTLiquidGlass.SubscriptionSurface");
+    CGRect frame = CGRectInset(view.bounds, 8, 2);
+    if (!CGRectEqualToRect(glass.frame, frame)) glass.frame = frame;
+    glass.layer.cornerRadius = MIN(radius, 16); glass.hidden = NO;
+    if (view.subviews.firstObject != glass) [view sendSubviewToBack:glass];
+}
+
+static const void *kYTLGAvatarOwnerKey = &kYTLGAvatarOwnerKey;
+static void YTLGStyleAvatarCollection(UICollectionView *collection, BOOL active) {
+    NSHashTable<UIView *> *owners = objc_getAssociatedObject(collection, kYTLGAvatarOwnerKey);
+    if (!active && !owners) return;
+    UIView *oldOwner = owners.anyObject;
+    UIView *owner = active ? collection : nil;
+    if (active) {
+        CGFloat height = CGRectGetHeight(collection.bounds);
+        UIView *parent = collection.superview;
+        for (NSUInteger depth = 0; parent && depth < 4; depth++, parent = parent.superview) {
+            CGFloat ph = CGRectGetHeight(parent.bounds), pw = CGRectGetWidth(parent.bounds);
+            if (ph > height + 20) break;
+            if (ph >= height - 4 && pw >= CGRectGetWidth(collection.bounds) &&
+                pw <= CGRectGetWidth(collection.window.bounds) + 1) owner = parent;
+        }
+    }
+    if (oldOwner && oldOwner != owner) YTLGRestoreSurface(oldOwner);
+    if (!owners) {
+        owners = [NSHashTable weakObjectsHashTable];
+        objc_setAssociatedObject(collection, kYTLGAvatarOwnerKey, owners, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [owners removeAllObjects];
+    if (owner) {
+        [owners addObject:owner];
+        if (owner != collection && objc_getAssociatedObject(collection, kYTLGSurfaceGlassKey))
+            YTLGRestoreSurface(collection);
+        // Cover the common avatar/All row when available, with equal outer
+        // margins. Preserve avatar sizes, labels and YouTube's scrolling.
+        YTLGApplySubscriptionGlass(owner, 16);
+    }
 }
 
 static void YTLGUpdateSubscriptionFilterHeaderGlass(UIView *header) {
     if (!header.window || CGRectGetHeight(header.bounds) < 55 ||
         CGRectGetHeight(header.bounds) > 240) return;
-    YTLGApplyPanelGlass(header, 20);
-}
-
-static BOOL YTLGHasCommentsHeading(UIView *view, NSUInteger depth) {
-    if (depth > 4 || YTLGIsOurView(view)) return NO;
-    NSString *text = [view isKindOfClass:UILabel.class] ? ((UILabel *)view).text : view.accessibilityLabel;
-    if ([text.lowercaseString hasPrefix:@"comments"]) return YES;
-    for (UIView *child in view.subviews)
-        if (YTLGHasCommentsHeading(child, depth + 1)) return YES;
-    return NO;
+    YTLGApplySubscriptionGlass(header, 20);
 }
 
 static void YTLGObserveElementsSurfaces(UIView *view) {
-    if (!view.window) return;
-    CGFloat w = CGRectGetWidth(view.bounds), h = CGRectGetHeight(view.bounds);
+    if (!view.window || YTLGViewOrAncestorContainsAny(view, @[@"comment"])) return;
     NSString *token = YTLGNormalizedViewToken(view);
-    BOOL commentCard = w > CGRectGetWidth(view.window.bounds)*0.65 && h >= 48 && h <= 180 &&
-        (([token containsString:@"comment"] &&
-          ([token containsString:@"teaser"] || [token containsString:@"entry"] ||
-           [token containsString:@"preview"] || [token containsString:@"carousel"])) ||
-         YTLGHasCommentsHeading(view, 0));
-    if (commentCard) {
-        // Prefer one enclosing preview card over nested header/text wrappers.
-        UIView *parent = view.superview;
-        for (NSUInteger depth = 0; parent && depth < 3; depth++, parent = parent.superview) {
-            CGFloat ph = CGRectGetHeight(parent.bounds);
-            if (ph > 180) break;
-            if (ph >= h && CGRectGetWidth(parent.bounds) >= w &&
-                [parent isKindOfClass:NSClassFromString(@"_ASDisplayView")] &&
-                YTLGHasCommentsHeading(parent, 0)) { commentCard = NO; break; }
-        }
-    }
-    if (commentCard) YTLGApplyPanelGlass(view, MAX(16, view.layer.cornerRadius));
-    else if (objc_getAssociatedObject(view, kYTLGSurfaceGlassKey)) YTLGRestoreSurface(view);
     if ([token containsString:@"chip"] || [token containsString:@"filter_chip"]) {
         UICollectionView *collection = YTLGRailCollection(view);
         if (collection) YTLGUpdateChipCollection(collection, YES);
@@ -4541,7 +4734,11 @@ static void YTLGObserveElementsSurfaces(UIView *view) {
 %group YTLiquidGlassTopTabTitles
 %hook YTTabTitlesView
 - (void)layoutSubviews { %orig; YTLGUpdateTopTabTitlesGlass(self); }
-- (void)didMoveToWindow { %orig; if (self.window) [self setNeedsLayout]; }
+- (void)didMoveToWindow { %orig; YTLGSettleTopRail(self); }
+- (void)didAddSubview:(UIView *)subview {
+    %orig(subview);
+    if (!YTLGIsOurView(subview)) YTLGQueueTopRail(self);
+}
 %end
 %end
 
@@ -4558,6 +4755,31 @@ static void YTLGObserveElementsSurfaces(UIView *view) {
 %end
 %end
 
+%group YTLiquidGlassSecondaryInput
+%hook UIControl
+- (void)addTarget:(id)target action:(SEL)action forControlEvents:(UIControlEvents)events {
+    %orig(target, action, events);
+    if (!YTLGIsOurView(self)) YTLGQueueAncestorTopRail(self);
+}
+%end
+%hook UIScrollView
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    UIView *cursor = view;
+    while (cursor && cursor != self) {
+        if ([cursor isKindOfClass:YTLGNativeSecondaryRail.class]) {
+            CGPoint motion = [self.panGestureRecognizer velocityInView:self];
+            if (fabs(motion.x) + fabs(motion.y) < 1)
+                motion = [self.panGestureRecognizer translationInView:self];
+            if (fabs(motion.y) > fabs(motion.x)) return YES;
+            break;
+        }
+        cursor = cursor.superview;
+    }
+    return %orig(view);
+}
+%end
+%end
+
 %group YTLiquidGlassSurfaceDiscovery
 %hook UICollectionView
 - (void)layoutSubviews {
@@ -4565,7 +4787,8 @@ static void YTLGObserveElementsSurfaces(UIView *view) {
     YTLGUpdateChipCollection(self, NO);
     CGFloat height = CGRectGetHeight(self.bounds);
     BOOL avatars = NO;
-    if (self.window && height >= 70 && height <= 180) {
+    if (self.window && height >= 70 && height <= 180 &&
+        !YTLGViewOrAncestorContainsAny(self, @[@"comment"])) {
         NSUInteger images = 0;
         CGFloat minY = CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
         for (UIView *cell in self.visibleCells) {
@@ -4580,28 +4803,7 @@ static void YTLGObserveElementsSurfaces(UIView *view) {
             CGRectGetMinY(onScreen) < CGRectGetHeight(self.window.bounds)*0.4;
         avatars = (images >= 2 && YTLGSubscriptionContext(self)) || topAvatarRow;
     }
-    if (avatars) YTLGApplyPanelGlass(self, 20);
-    else if (objc_getAssociatedObject(self, kYTLGSurfaceGlassKey)) YTLGRestoreSurface(self);
-}
-%end
-%hook UIViewController
-- (void)viewDidLayoutSubviews {
-    %orig;
-    NSString *name = NSStringFromClass(self.class).lowercaseString;
-    BOOL comment = [name containsString:@"comment"];
-    BOOL panel = [name containsString:@"engagementpanel"] || [name containsString:@"engagement_panel"];
-    if ((!comment && !panel) || !self.isViewLoaded || !self.view.window) return;
-    UIView *view = self.view;
-    if (CGRectGetHeight(view.bounds) < 220 ||
-        CGRectGetWidth(view.bounds) < CGRectGetWidth(view.window.bounds)*0.65) return;
-    BOOL matches = comment || YTLGHasCommentsHeading(view, 0);
-    // Apply once at the outermost matching controller, avoiding stacked glass.
-    for (UIView *parent = view.superview; parent; parent = parent.superview) {
-        UIVisualEffectView *ancestorGlass = objc_getAssociatedObject(parent, kYTLGSurfaceGlassKey);
-        if (ancestorGlass && !ancestorGlass.hidden) { matches = NO; break; }
-    }
-    if (matches) YTLGApplyPanelGlass(view, 24);
-    else if (objc_getAssociatedObject(view, kYTLGSurfaceGlassKey)) YTLGRestoreSurface(view);
+    YTLGStyleAvatarCollection(self, avatars);
 }
 %end
 %end
@@ -4776,6 +4978,7 @@ YTLGStyleYTKACEStandaloneControls(
 %ctor {
     if (@available(iOS 26.0, *)) {
         %init(YTLiquidGlassSurfaceDiscovery);
+        %init(YTLiquidGlassSecondaryInput);
         if (NSClassFromString(@"YTPivotBarView") &&
             NSClassFromString(@"YTPivotBarItemView") &&
             NSClassFromString(@"YTPivotBarViewController")) {
