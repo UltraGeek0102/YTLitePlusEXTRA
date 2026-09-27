@@ -71,7 +71,7 @@ on:
 
       ytnovote:
         description: "Integrate YTSilentVote"
-        default: true
+        default: false
         required: false
         type: boolean
 
@@ -83,7 +83,7 @@ on:
 
       gonerino:
         description: "Integrate Gonerino"
-        default: true
+        default: false
         required: false
         type: boolean
 
@@ -95,7 +95,7 @@ on:
 
       yougetcaption:
         description: "Integrate YouGetCaption"
-        default: true
+        default: false
         required: false
         type: boolean
 
@@ -107,7 +107,7 @@ on:
 
       volboost:
         description: "Integrate VolumeBoostYT (Require iOS 16+)"
-        default: true
+        default: false
         required: false
         type: boolean
 
