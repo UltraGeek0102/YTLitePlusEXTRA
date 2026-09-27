@@ -106,6 +106,7 @@ static const void *kYTLGRefreshingKey = &kYTLGRefreshingKey;
 @property(nonatomic, weak) YTPivotBarView *youtubePivotBar;
 @property(nonatomic, copy) NSArray<NSString *> *pivotIdentifiers;
 @property(nonatomic, copy) NSDictionary<NSString *, UIButton *> *originalButtons;
+@property(nonatomic, copy) NSDictionary<NSString *, UIView *> *originalItemViews;
 @property(nonatomic, copy) NSString *contentSignature;
 @property(nonatomic, assign) BOOL syncingSelection;
 @end
@@ -166,12 +167,32 @@ static const void *kYTLGRefreshingKey = &kYTLGRefreshingKey;
         UIButton *originalButton =
             self.originalButtons[identifier];
 
-        if ([originalButton
-                isKindOfClass:UIButton.class]) {
-
+        BOOL dispatched = NO;
+        if ([originalButton isKindOfClass:UIButton.class] &&
+            originalButton.allTargets.count > 0) {
             [originalButton
                 sendActionsForControlEvents:
                     UIControlEventTouchUpInside];
+            dispatched = YES;
+        }
+
+        // Icon-only pivots can install the tap on the item view rather than
+        // on navigationButton. An empty button target list must not swallow
+        // the native Create tap.
+        if (!dispatched) {
+            UIView *originalItem = self.originalItemViews[identifier];
+            if (originalItem &&
+                [originalItem respondsToSelector:@selector(accessibilityActivate)]) {
+                dispatched = [originalItem accessibilityActivate];
+            }
+        }
+
+        if (!dispatched && self.youtubePivotBar) {
+            [self.youtubePivotBar selectItemWithPivotIdentifier:identifier];
+            dispatched = YES;
+        }
+        if (!dispatched && self.youtubeController) {
+            [self.youtubeController selectItemWithPivotIdentifier:identifier];
         }
 
         // Create is momentary. Return UIKit's selection lens to YouTube's
@@ -360,6 +381,19 @@ YTLGAllItemViews(YTPivotBarView *bar) {
     return items;
 }
 
+static NSString *
+YTLGIdentifierForItemView(YTPivotBarItemView *item) {
+    id renderer = item.renderer;
+    if ([renderer respondsToSelector:@selector(pivotIdentifier)]) {
+        return [renderer pivotIdentifier];
+    }
+    if ([renderer respondsToSelector:@selector(pivotBarItemRenderer)] ||
+        [renderer respondsToSelector:@selector(pivotBarIconOnlyItemRenderer)]) {
+        return YTLGPivotIdentifierForSupportedRenderer(renderer);
+    }
+    return nil;
+}
+
 static NSDictionary<NSString *, YTPivotBarItemView *> *
 YTLGItemViewsByIdentifier(YTPivotBarView *bar) {
     NSMutableDictionary *map =
@@ -368,8 +402,7 @@ YTLGItemViewsByIdentifier(YTPivotBarView *bar) {
     for (YTPivotBarItemView *item
             in YTLGAllItemViews(bar)) {
 
-        NSString *identifier =
-            item.renderer.pivotIdentifier;
+        NSString *identifier = YTLGIdentifierForItemView(item);
 
         if (identifier.length > 0 &&
             !map[identifier]) {
@@ -459,7 +492,9 @@ YTLGItemUsesOriginalArtwork(YTPivotBarItemView *item) {
     // YouTube's profile/account pivot is thumbnail-backed rather than a normal
     // vector icon. Never template-tint thumbnail artwork: doing so turns the
     // account picture into a flat white/blue silhouette.
-    id thumbnail = item.renderer.thumbnail;
+    id renderer = item.renderer;
+    id thumbnail = [renderer respondsToSelector:@selector(thumbnail)]
+        ? [renderer thumbnail] : nil;
     if (thumbnail != nil) {
         return YES;
     }
@@ -471,8 +506,7 @@ static BOOL
 YTLGIsYTKACETab(
     YTPivotBarItemView *item
 ) {
-    NSString *identifier =
-        item.renderer.pivotIdentifier;
+    NSString *identifier = YTLGIdentifierForItemView(item);
 
     return
         [identifier
@@ -959,8 +993,7 @@ static void YTLGRefreshNow(
                   NSUInteger idx,
                   BOOL *stop) {
 
-            NSString *identifier =
-                item.renderer.pivotIdentifier;
+            NSString *identifier = YTLGIdentifierForItemView(item);
 
             if (identifier.length > 0 &&
                 ![fallback
@@ -989,6 +1022,8 @@ static void YTLGRefreshNow(
             [NSMutableArray array];
 
         NSMutableDictionary<NSString *, UIButton *> *originalButtons =
+            [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, UIView *> *originalItemViews =
             [NSMutableDictionary dictionary];
 
         for (NSString *identifier in identifiers) {
@@ -1101,6 +1136,7 @@ static void YTLGRefreshNow(
 
             [nativeItems addObject:nativeItem];
             [nativeIdentifiers addObject:identifier];
+            originalItemViews[identifier] = itemView;
 
             UIButton *originalButton =
                 itemView.navigationButton;
@@ -1119,6 +1155,7 @@ static void YTLGRefreshNow(
 
         nativeBar.originalButtons =
             originalButtons;
+        nativeBar.originalItemViews = originalItemViews;
 
         // Standalone UITabBar displays the supplied items directly and never
         // synthesizes UITabBarController's "More" view controller.
@@ -1129,6 +1166,27 @@ static void YTLGRefreshNow(
         nativeBar.contentSignature =
             signature;
     }
+
+    // The underlying buttons are replaced during YouTube/YTLite updates even
+    // when their titles and icons (the content signature) stay identical.
+    NSMutableDictionary<NSString *, UIButton *> *liveButtons =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, UIView *> *liveItems =
+        [NSMutableDictionary dictionary];
+    for (NSString *identifier in nativeBar.pivotIdentifiers) {
+        YTPivotBarItemView *item = views[identifier];
+        if (item) {
+            liveItems[identifier] = item;
+            if ([item.navigationButton isKindOfClass:UIButton.class]) {
+                liveButtons[identifier] = item.navigationButton;
+            }
+        } else if ([identifier caseInsensitiveCompare:@"FEuploads"] == NSOrderedSame) {
+            UIButton *create = YTLGFindCreateButtonInView(bar);
+            if (create) liveButtons[identifier] = create;
+        }
+    }
+    nativeBar.originalButtons = liveButtons;
+    nativeBar.originalItemViews = liveItems;
 
     // Force even redistribution whenever the active count changes.
     nativeBar.itemPositioning =
@@ -1375,7 +1433,9 @@ static UIVisualEffect *YTLGTopNavigationGlassEffect(void) {
 
             // The YouTube buttons remain the hit-test owners above this
             // sibling glass surface.
-            effect.interactive = NO;
+            // Interactive material gives compact controls and moving
+            // selection lenses UIKit's touch response on iOS 26+.
+            effect.interactive = prominent;
             return effect;
         }
     }
@@ -3701,10 +3761,14 @@ YTLGScopedSurfaceKindForElementsView(
          ([token containsString:@"like"] &&
           ![token containsString:@"unlike"]))) {
 
-        return
-            CGRectGetWidth(view.bounds) <= 56.0
-                ? YTLGScopedSurfaceCompactCircle
-                : YTLGScopedSurfaceRegular;
+        // The comment reaction row uses broad Elements hit areas. Keep the
+        // visual glass at icon size while leaving those hit areas intact.
+        return ([token containsString:@"like"] ||
+                [token containsString:@"dislike"] ||
+                [token containsString:@"reply"] ||
+                [token containsString:@"send"])
+            ? YTLGScopedSurfaceCompactCircle
+            : YTLGScopedSurfaceRegular;
     }
 
     // ---- Search filter button ----
@@ -3886,17 +3950,9 @@ YTLGApplyScopedElementsGlass(
     if (kind ==
         YTLGScopedSurfaceCompactCircle) {
 
-        CGFloat side =
-            MIN(
-                46.0,
-                MAX(
-                    36.0,
-                    MIN(
-                        CGRectGetWidth(bounds),
-                        CGRectGetHeight(bounds)
-                    )
-                )
-            );
+        BOOL isComment = YTLGViewOrAncestorContainsAny(view, @[@"comment"]);
+        CGFloat side = MIN(isComment ? 31.0 : 42.0,
+                           MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds)));
 
         glass.frame =
             CGRectMake(
@@ -4419,7 +4475,8 @@ YTLGInstallTopTabPanIfNeeded(
                         @selector(handlePan:)];
 
     pan.maximumNumberOfTouches = 1;
-    pan.cancelsTouchesInView = NO;
+    // Normal taps go to YouTube; a recognized drag is dispatched once here.
+    pan.cancelsTouchesInView = YES;
 
     [root
         addGestureRecognizer:pan];
