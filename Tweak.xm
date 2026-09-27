@@ -4075,6 +4075,7 @@ static void YTLGObserveElementsSurfaces(UIView *view);
 #pragma mark - Native secondary navigation (UIKit owns selection and tracking)
 
 static const void *kYTLGNativeRailKey = &kYTLGNativeRailKey;
+static const void *kYTLGStableFilterRailKey = &kYTLGStableFilterRailKey;
 static const void *kYTLGSurfaceGlassKey = &kYTLGSurfaceGlassKey;
 static const void *kYTLGSurfaceColorsKey = &kYTLGSurfaceColorsKey;
 
@@ -4289,6 +4290,59 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
     return nil;
 }
 
+static UIImage *
+YTLGSecondaryTabTextImage(NSString *text) {
+    if (text.length == 0) {
+        return nil;
+    }
+
+    UIFont *font =
+        [UIFont systemFontOfSize:14.0
+                          weight:UIFontWeightMedium];
+
+    NSDictionary *attributes = @{
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName:
+            UIColor.blackColor
+    };
+
+    CGSize measured =
+        [text sizeWithAttributes:attributes];
+
+    CGSize size =
+        CGSizeMake(
+            ceil(measured.width) + 8.0,
+            24.0
+        );
+
+    UIGraphicsBeginImageContextWithOptions(
+        size,
+        NO,
+        0.0
+    );
+
+    CGRect rect =
+        CGRectMake(
+            (size.width - measured.width) * 0.5,
+            (size.height - measured.height) * 0.5,
+            measured.width,
+            measured.height
+        );
+
+    [text drawInRect:rect
+      withAttributes:attributes];
+
+    UIImage *image =
+        UIGraphicsGetImageFromCurrentImageContext();
+
+    UIGraphicsEndImageContext();
+
+    return [image
+        imageWithRenderingMode:
+            UIImageRenderingModeAlwaysTemplate];
+}
+
+
 @interface YTLGNativeSecondaryRail : UITabBar <UITabBarDelegate>
 @property(nonatomic, weak) UIView *sourceRoot;
 @property(nonatomic, weak) UICollectionView *sourceCollection;
@@ -4416,38 +4470,88 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
 }
 
 - (BOOL)activateSourceAtIndex:(NSUInteger)index {
-    if (index >= self.sourceViews.count) {
+    if (index >= self.sourcePaths.count &&
+        index >= self.sourceViews.count) {
         return NO;
     }
-
-    UIView *source =
-        self.sourceViews[index];
 
     UICollectionView *collection =
         self.sourceCollection;
 
-    if (collection) {
-        NSIndexPath *currentPath =
-            [source
-                isKindOfClass:
-                    UICollectionViewCell.class]
-            ? [collection
-                indexPathForCell:
-                    (UICollectionViewCell *)source]
-            : nil;
+    if (collection &&
+        index < self.sourcePaths.count) {
 
-        BOOL stillCurrent =
-            index < self.sourcePaths.count &&
-            currentPath &&
-            [currentPath
-                isEqual:self.sourcePaths[index]];
+        NSIndexPath *path =
+            self.sourcePaths[index];
 
-        if (!stillCurrent) {
-            return NO;
+        // Prefer the currently bound cell. YouTube recycles the original
+        // Texture cell whenever a filter change scrolls/reloads the chip row.
+        UICollectionViewCell *liveCell =
+            [collection
+                cellForItemAtIndexPath:path];
+
+        if (liveCell &&
+            YTLGActivateRailSource(
+                liveCell)) {
+            return YES;
         }
+
+        // The old source object can still own the Texture action even after it
+        // has temporarily left the collection's visible bounds.
+        if (index < self.sourceViews.count) {
+            UIView *oldSource =
+                self.sourceViews[index];
+
+            if (oldSource &&
+                YTLGActivateRailSource(
+                    oldSource)) {
+                return YES;
+            }
+        }
+
+        // Final collection-native fallback. This is important on builds where
+        // the visual cell contains no directly discoverable UIControl or
+        // ASControlNode action.
+        id<UICollectionViewDelegate> delegate =
+            collection.delegate;
+
+        SEL didSelect =
+            @selector(
+                collectionView:
+                didSelectItemAtIndexPath:
+            );
+
+        if ([delegate
+                respondsToSelector:
+                    didSelect]) {
+
+            [collection
+                selectItemAtIndexPath:path
+                             animated:NO
+                       scrollPosition:
+                    UICollectionViewScrollPositionNone];
+
+            ((void (*)(id, SEL, UICollectionView *, NSIndexPath *))
+                objc_msgSend)(
+                    delegate,
+                    didSelect,
+                    collection,
+                    path
+                );
+
+            return YES;
+        }
+
+        return NO;
     }
 
-    return YTLGActivateRailSource(source);
+    if (index >= self.sourceViews.count) {
+        return NO;
+    }
+
+    return YTLGActivateRailSource(
+        self.sourceViews[index]
+    );
 }
 
 - (void)tabBar:(UITabBar *)tabBar
@@ -4547,19 +4651,38 @@ static void YTLGUpdateNativeRailNow(
         return;
     }
 
+    BOOL stableCollectionRail =
+        collection != nil &&
+        [objc_getAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey
+        ) boolValue];
+
+    // During a YouTube filter reload the collection can have zero/one visible
+    // cells for a frame. Keep the already-created native bar instead of
+    // restoring the old chip UI and causing the flash seen in the recording.
     if (sources.count < 2) {
+        if (rail &&
+            stableCollectionRail &&
+            rail.items.count >= 2) {
+
+            rail.hidden = NO;
+            rail.userInteractionEnabled = NO;
+            return;
+        }
+
         [rail restoreSources];
         rail.hidden = YES;
         return;
     }
 
-    NSMutableArray<NSString *> *titles =
+    NSMutableArray<NSString *> *observedTitles =
         [NSMutableArray array];
 
-    NSMutableArray *images =
+    NSMutableArray *observedImages =
         [NSMutableArray array];
 
-    NSMutableArray<NSIndexPath *> *paths =
+    NSMutableArray<NSIndexPath *> *observedPaths =
         [NSMutableArray array];
 
     CGRect unionFrame = CGRectNull;
@@ -4615,13 +4738,24 @@ static void YTLGUpdateNativeRailNow(
         }
 
         if (!title.length && !image) {
+            if (rail &&
+                stableCollectionRail) {
+                rail.hidden = NO;
+                rail.userInteractionEnabled = NO;
+                return;
+            }
+
             [rail restoreSources];
             rail.hidden = YES;
             return;
         }
 
-        [titles addObject:title ?: @""];
-        [images addObject:image ?: (id)NSNull.null];
+        [observedTitles
+            addObject:title ?: @""];
+
+        [observedImages
+            addObject:
+                image ?: (id)NSNull.null];
 
         CGRect sourceFrame =
             [source
@@ -4636,13 +4770,6 @@ static void YTLGUpdateNativeRailNow(
                     sourceFrame
                 );
 
-        if (YTLGSourceSelected(
-                source,
-                0)) {
-            selectedIndex =
-                (NSInteger)titles.count - 1;
-        }
-
         if (collection) {
             NSIndexPath *path =
                 [source
@@ -4654,23 +4781,57 @@ static void YTLGUpdateNativeRailNow(
                 : nil;
 
             if (!path) {
+                if (rail &&
+                    stableCollectionRail) {
+                    rail.hidden = NO;
+                    rail.userInteractionEnabled = NO;
+                    return;
+                }
+
                 [rail restoreSources];
                 rail.hidden = YES;
                 return;
             }
 
-            [paths addObject:path];
+            [observedPaths addObject:path];
+
+            if (YTLGSourceSelected(
+                    source,
+                    0)) {
+
+                NSUInteger existingIndex =
+                    [rail.sourcePaths
+                        indexOfObject:path];
+
+                if (existingIndex != NSNotFound) {
+                    selectedIndex =
+                        (NSInteger)existingIndex;
+                } else if (!stableCollectionRail) {
+                    selectedIndex =
+                        (NSInteger)observedTitles.count -
+                        1;
+                }
+            }
+        } else if (YTLGSourceSelected(
+                       source,
+                       0)) {
+
+            selectedIndex =
+                (NSInteger)observedTitles.count -
+                1;
         }
 
-        if (!YTLGCanActivateRailSource(source)) {
+        if (!YTLGCanActivateRailSource(source) &&
+            !collection) {
+
             [rail restoreSources];
             rail.hidden = YES;
             return;
         }
     }
 
-    // YTTabTitlesView occasionally leaves its selected bit stale while the
-    // underline moves. Use the real underline geometry as the stronger source.
+    // Home's YTTabTitlesView can leave its selected trait stale. The actual
+    // underline position is a better signal for Home/Subscriptions.
     NSMutableArray<UIView *> *indicators =
         [NSMutableArray array];
 
@@ -4785,12 +4946,54 @@ static void YTLGUpdateNativeRailNow(
         );
     }
 
+    // For the Subscriptions filter collection, freeze the FIRST stable set of
+    // visible filters. YouTube scrolls/recycles the hidden chip collection
+    // after a filter is selected; rebuilding from visibleCells was why the
+    // native bar mutated from All/Today/... into Posts/Continue watching.
+    BOOL freezeExistingCollectionItems =
+        collection &&
+        stableCollectionRail &&
+        rail.sourceTitles.count >= 2 &&
+        rail.sourcePaths.count ==
+            rail.sourceTitles.count;
+
+    NSArray<NSString *> *titles =
+        freezeExistingCollectionItems
+            ? rail.sourceTitles
+            : observedTitles;
+
+    NSArray *images =
+        freezeExistingCollectionItems
+            ? rail.sourceImages
+            : observedImages;
+
+    NSArray<NSIndexPath *> *paths =
+        freezeExistingCollectionItems
+            ? rail.sourcePaths
+            : observedPaths;
+
     BOOL changed =
         ![rail.sourceTitles
             isEqualToArray:titles] ||
         ![rail.sourceImages
             isEqualToArray:images];
 
+    if (collection &&
+        !stableCollectionRail &&
+        observedTitles.count >= 2) {
+
+        objc_setAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey,
+            @YES,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+
+        stableCollectionRail = YES;
+    }
+
+    // Keep original views/layers suppressed but restore any objects that are
+    // no longer part of this active source set.
     NSMutableSet *keptViews =
         [NSMutableSet
             setWithArray:sources];
@@ -4807,8 +5010,7 @@ static void YTLGUpdateNativeRailNow(
     for (UIView *source in sources) {
         if (source.layer) {
             [keptLayers
-                addObject:
-                    source.layer];
+                addObject:source.layer];
         }
     }
 
@@ -4846,37 +5048,23 @@ static void YTLGUpdateNativeRailNow(
         }
     }
 
-    for (UIView *parent = root;
-         parent;
-         parent = parent.superview) {
+    rail.sourceCollection =
+        collection;
 
-        if ([parent
-                isKindOfClass:
-                    UIScrollView.class]) {
+    // Non-collection tabs can keep direct source references. Collection-backed
+    // filters use stable NSIndexPaths so cell recycling does not break taps.
+    if (!collection ||
+        !freezeExistingCollectionItems) {
 
-            UIScrollView *scroll =
-                (UIScrollView *)parent;
-
-            if (!scroll.canCancelContentTouches) {
-                if (![rail.scrollCancellation
-                        objectForKey:scroll]) {
-
-                    [rail.scrollCancellation
-                        setObject:@NO
-                           forKey:scroll];
-                }
-
-                scroll.canCancelContentTouches =
-                    YES;
-            }
-        }
+        rail.sourceViews =
+            sources;
+        rail.sourcePaths =
+            paths;
     }
 
-    rail.sourceViews = sources;
-    rail.sourcePaths = paths;
-    rail.sourceCollection = collection;
+    if (changed ||
+        rail.items.count != titles.count) {
 
-    if (changed) {
         NSMutableArray<UITabBarItem *> *items =
             [NSMutableArray array];
 
@@ -4884,50 +5072,78 @@ static void YTLGUpdateNativeRailNow(
              i < titles.count;
              i++) {
 
-            NSString *title =
+            NSString *text =
                 titles[i].length
                     ? titles[i]
                     : nil;
 
-            UIImage *image =
+            UIImage *sourceImage =
                 [images[i]
                     isKindOfClass:
                         UIImage.class]
                 ? images[i]
                 : nil;
 
+            // IMPORTANT: text-only UITabBarItems caused the giant/ghost title
+            // animation visible in the Home recording. Render the text as a
+            // template image instead, so UIKit sees an icon-only item and its
+            // native Liquid Glass selection animation remains stable.
+            UIImage *displayImage =
+                sourceImage
+                    ?: YTLGSecondaryTabTextImage(
+                        text
+                    );
+
             UITabBarItem *item =
                 [[UITabBarItem alloc]
-                    initWithTitle:title
-                           image:image
-                   selectedImage:image];
-
-            if (title.length &&
-                !image) {
-                // Title-only filter tabs should sit optically in the centre
-                // instead of reserving the normal icon+title vertical layout.
-                item.titlePositionAdjustment =
-                    UIOffsetMake(
-                        0.0,
-                        -7.0
-                    );
-            }
+                    initWithTitle:nil
+                           image:displayImage
+                   selectedImage:displayImage];
 
             item.accessibilityLabel =
-                title.length
-                    ? title
+                text.length
+                    ? text
                     : @"Explore";
 
             [items addObject:item];
         }
 
         rail.syncingSelection = YES;
+
         [rail setItems:items
               animated:NO];
+
         rail.syncingSelection = NO;
 
-        rail.sourceTitles = titles;
-        rail.sourceImages = images;
+        rail.sourceTitles =
+            [titles copy];
+
+        rail.sourceImages =
+            [images copy];
+    }
+
+    // UICollectionView itself may know the selected index path even if the
+    // current visible cell has not propagated accessibility/select state yet.
+    if (collection &&
+        selectedIndex == NSNotFound) {
+
+        NSArray<NSIndexPath *> *selectedPaths =
+            collection.indexPathsForSelectedItems;
+
+        for (NSIndexPath *selectedPath
+                in selectedPaths) {
+
+            NSUInteger index =
+                [rail.sourcePaths
+                    indexOfObject:
+                        selectedPath];
+
+            if (index != NSNotFound) {
+                selectedIndex =
+                    (NSInteger)index;
+                break;
+            }
+        }
     }
 
     if (selectedIndex != NSNotFound &&
@@ -4950,19 +5166,15 @@ static void YTLGUpdateNativeRailNow(
         }
     }
 
-    // Make both secondary bars physically use native UITabBar proportions.
-    // The Home/Subscriptions rail stays compact around its source content.
-    // The Subscriptions filter rail spans the available collection width,
-    // just like a real navigation bar.
     CGFloat availableHeight =
         CGRectGetHeight(root.bounds);
 
     CGFloat height =
         MIN(
-            49.0,
+            50.0,
             MAX(
-                42.0,
-                availableHeight - 4.0
+                44.0,
+                availableHeight - 2.0
             )
         );
 
@@ -4986,17 +5198,20 @@ static void YTLGUpdateNativeRailNow(
             CGRectInset(
                 unionFrame,
                 -8.0,
-                0.0
+                -2.0
             );
 
-        frame.size.height = height;
+        frame.size.height =
+            height;
+
         frame.origin.y =
             CGRectGetMidY(unionFrame) -
             height * 0.5;
 
         frame.origin.x =
             MAX(
-                CGRectGetMinX(root.bounds) + 8.0,
+                CGRectGetMinX(root.bounds) +
+                    8.0,
                 frame.origin.x
             );
 
@@ -5006,10 +5221,12 @@ static void YTLGUpdateNativeRailNow(
 
         if (CGRectGetMaxX(frame) >
             maxX) {
+
             frame.size.width =
                 MAX(
                     0.0,
-                    maxX - frame.origin.x
+                    maxX -
+                    frame.origin.x
                 );
         }
     }
@@ -5024,6 +5241,7 @@ static void YTLGUpdateNativeRailNow(
         UITabBarItemPositioningFill;
 
     rail.hidden = NO;
+    rail.userInteractionEnabled = YES;
     rail.opaque = NO;
     rail.backgroundColor =
         UIColor.clearColor;
@@ -5157,34 +5375,142 @@ static void YTLGResetNativeRail(UIView *root) {
     [rail restoreSources]; rail.hidden = YES;
 }
 
-static void YTLGUpdateChipCollection(UICollectionView *collection, BOOL knownChip) {
-    if (!collection.window || collection.hidden) return;
-    if (YTLGViewOrAncestorContainsAny(collection, @[@"comment"])) {
-        YTLGResetNativeRail(collection); return;
+static void YTLGUpdateChipCollection(
+    UICollectionView *collection,
+    BOOL knownChip
+) {
+    if (!collection.window ||
+        collection.hidden) {
+        return;
     }
-    CGFloat height = CGRectGetHeight(collection.bounds);
-    if (height < 26 || height > 70) { YTLGResetNativeRail(collection); return; }
-    BOOL context = knownChip || YTLGViewOrAncestorContainsAny(collection,
-        @[@"chip", @"topic", @"feedfilter", @"feed_filter", @"subscription", @"channelfilter"]);
-    context = context || YTLGSubscriptionContext(collection);
-    NSArray<UICollectionViewCell *> *cells = [collection.visibleCells
-        sortedArrayUsingComparator:^NSComparisonResult(UICollectionViewCell *a, UICollectionViewCell *b) {
-            return [ [collection indexPathForCell:a] compare:[collection indexPathForCell:b] ];
-        }];
+
+    if (YTLGViewOrAncestorContainsAny(
+            collection,
+            @[@"comment"])) {
+
+        YTLGResetNativeRail(collection);
+
+        objc_setAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey,
+            nil,
+            OBJC_ASSOCIATION_ASSIGN
+        );
+
+        return;
+    }
+
+    CGFloat height =
+        CGRectGetHeight(
+            collection.bounds
+        );
+
+    if (height < 26.0 ||
+        height > 70.0) {
+        return;
+    }
+
+    BOOL sticky =
+        [objc_getAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey
+        ) boolValue];
+
+    BOOL context =
+        sticky ||
+        knownChip ||
+        YTLGViewOrAncestorContainsAny(
+            collection,
+            @[
+                @"chip",
+                @"topic",
+                @"feedfilter",
+                @"feed_filter",
+                @"subscription",
+                @"channelfilter"
+            ]
+        );
+
+    context =
+        context ||
+        YTLGSubscriptionContext(
+            collection
+        );
+
+    NSArray<UICollectionViewCell *> *cells =
+        [collection.visibleCells
+            sortedArrayUsingComparator:
+                ^NSComparisonResult(
+                    UICollectionViewCell *a,
+                    UICollectionViewCell *b) {
+
+        NSIndexPath *aPath =
+            [collection indexPathForCell:a];
+
+        NSIndexPath *bPath =
+            [collection indexPathForCell:b];
+
+        return [aPath compare:bPath];
+    }];
+
     if (!context) {
-        // Recent YouTube builds render the subscriptions chips in generic
-        // Texture classes. Recognize the compact row from multiple labels.
-        NSSet *filterTitles = [NSSet setWithArray:@[@"all", @"today", @"videos", @"shorts", @"live", @"podcasts"]];
+        NSSet *filterTitles =
+            [NSSet setWithArray:@[
+                @"all",
+                @"today",
+                @"videos",
+                @"shorts",
+                @"live",
+                @"podcasts"
+            ]];
+
         NSUInteger matches = 0;
-        for (UIView *cell in cells)
-            if ([filterTitles containsObject:(YTLGRailTitle(cell, 0).lowercaseString ?: @"")]) matches++;
-        context = matches >= 3;
+
+        for (UIView *cell in cells) {
+            NSString *title =
+                YTLGRailTitle(
+                    cell,
+                    0
+                ).lowercaseString ?: @"";
+
+            if ([filterTitles
+                    containsObject:title]) {
+                matches++;
+            }
+        }
+
+        context =
+            matches >= 3;
     }
-    if (!context) { YTLGResetNativeRail(collection); return; }
-    for (UIView *cell in cells) if (YTLGContainsLargeImage(cell, 0)) {
-        YTLGResetNativeRail(collection); return;
+
+    if (!context) {
+        return;
     }
-    YTLGUpdateNativeRail(collection, cells, collection);
+
+    for (UIView *cell in cells) {
+        if (YTLGContainsLargeImage(
+                cell,
+                0)) {
+            return;
+        }
+    }
+
+    if (!sticky &&
+        cells.count >= 2) {
+
+        objc_setAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey,
+            @YES,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    YTLGUpdateNativeRail(
+        collection,
+        cells,
+        collection
+    );
 }
 
 // Clear only neutral surface fills. Images, text, controls and native material
@@ -5386,6 +5712,76 @@ static void YTLGObserveElementsSurfaces(UIView *view) {
 %end
 
 %group YTLiquidGlassSecondaryInput
+
+%hook UICollectionViewCell
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (!self.window) {
+        return;
+    }
+
+    UICollectionView *collection =
+        YTLGRailCollection(self);
+
+    if (!collection ||
+        ![objc_getAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey
+        ) boolValue]) {
+        return;
+    }
+
+    YTLGNativeSecondaryRail *rail =
+        objc_getAssociatedObject(
+            collection,
+            kYTLGNativeRailKey
+        );
+
+    if (rail &&
+        !rail.hidden &&
+        rail.sourceCollection ==
+            collection) {
+
+        [rail suppress:self];
+        YTLGUpdateChipCollection(
+            collection,
+            NO
+        );
+    }
+}
+
+- (void)layoutSubviews {
+    %orig;
+
+    UICollectionView *collection =
+        YTLGRailCollection(self);
+
+    if (!collection ||
+        ![objc_getAssociatedObject(
+            collection,
+            kYTLGStableFilterRailKey
+        ) boolValue]) {
+        return;
+    }
+
+    YTLGNativeSecondaryRail *rail =
+        objc_getAssociatedObject(
+            collection,
+            kYTLGNativeRailKey
+        );
+
+    if (rail &&
+        !rail.hidden &&
+        rail.sourceCollection ==
+            collection) {
+        [rail suppress:self];
+    }
+}
+
+%end
+
 
 %hook UIControl
 
