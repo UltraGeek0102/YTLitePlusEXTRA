@@ -1,4 +1,4 @@
-// YTLiquidGlass FINAL STABLE + YTKACE tab icon compatibility (build fix)
+// YTLiquidGlass EXPERIMENTAL ALL-IN-ONE — stable core + next native glass surfaces
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -3161,6 +3161,892 @@ static BOOL YTLGTryPresentNativeSheetMenu(
 
 %end
 
+
+#pragma mark - Experimental scoped Liquid Glass surfaces
+
+// These modules intentionally avoid the old "glass every YTQTMButton" approach.
+// Each feature is restricted to a known container, exact accessibility role,
+// or tightly-scoped YouTube/YTKACE screen.
+//
+// Coverage in this all-in-one test build:
+//   • channel/profile CTA buttons
+//   • You/Profile page standalone CTA buttons
+//   • Accounts/profile header action
+//   • comment sort/filter/send controls
+//   • compact search-filter control
+//   • create/upload action rows when rendered as Elements views
+//   • one-piece glass behind the top topic/category chip rail
+//   • YTKACE settings standalone controls
+//
+// Existing stable modules continue to cover:
+//   • native standalone bottom UITabBar
+//   • YTLite/YTKACE tab order + custom icon compatibility
+//   • top-right header controls
+//   • inactive + active search glass
+//   • compact back buttons
+//   • native UIKit UIMenu/UIAction conversion for ordinary non-player action
+//     sheets, including suitable create/bottom-sheet flows
+//
+// Native UIActivityViewController share sheets are deliberately left alone so
+// UIKit owns their appearance end-to-end.
+
+@interface _ASDisplayView : UIView
+@end
+
+@interface YTChipCloudCell : UIView
+@end
+
+@interface YTKACERootOptionsController : UIViewController
+@end
+
+@interface YTKACETabEditorController : UIViewController
+@end
+
+@interface YTKACESearchOverlayController : UIViewController
+@end
+
+typedef NS_ENUM(NSInteger, YTLGScopedSurfaceKind) {
+    YTLGScopedSurfaceNone = 0,
+    YTLGScopedSurfaceRegular,
+    YTLGScopedSurfaceProminent,
+    YTLGScopedSurfaceCompactCircle
+};
+
+static const void *kYTLGScopedElementGlassKey =
+    &kYTLGScopedElementGlassKey;
+
+static const void *kYTLGChipRailGlassKey =
+    &kYTLGChipRailGlassKey;
+
+static const void *kYTLGYTKACEControlGlassKey =
+    &kYTLGYTKACEControlGlassKey;
+
+static UIVisualEffect *
+YTLGScopedGlassEffect(BOOL prominent) {
+    if (@available(iOS 26.0, *)) {
+        Class glassClass =
+            NSClassFromString(@"UIGlassEffect");
+
+        if (glassClass &&
+            [glassClass
+                respondsToSelector:
+                    @selector(effectWithStyle:)]) {
+
+            UIGlassEffect *effect =
+                [UIGlassEffect
+                    effectWithStyle:
+                        UIGlassEffectStyleRegular];
+
+            effect.interactive = NO;
+
+            if (prominent) {
+                effect.tintColor =
+                    [UIColor.labelColor
+                        colorWithAlphaComponent:0.10];
+            }
+
+            return effect;
+        }
+    }
+
+    return [UIBlurEffect
+        effectWithStyle:
+            UIBlurEffectStyleSystemChromeMaterial];
+}
+
+static NSString *
+YTLGNormalizedViewToken(UIView *view) {
+    if (!view) return @"";
+
+    NSString *className =
+        NSStringFromClass(view.class)
+            ?: @"";
+
+    NSString *identifier =
+        view.accessibilityIdentifier
+            ?: @"";
+
+    NSString *label =
+        view.accessibilityLabel
+            ?: @"";
+
+    return [[NSString
+        stringWithFormat:
+            @"%@ %@ %@",
+            className,
+            identifier,
+            label]
+        lowercaseString];
+}
+
+static NSString *
+YTLGTrimmedLowerLabel(UIView *view) {
+    NSString *label =
+        view.accessibilityLabel
+            ?: @"";
+
+    return [[label
+        stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet]
+        lowercaseString];
+}
+
+static BOOL
+YTLGViewOrAncestorContainsAny(
+    UIView *view,
+    NSArray<NSString *> *needles
+) {
+    UIView *cursor = view;
+
+    for (NSUInteger depth = 0;
+         cursor && depth < 22;
+         depth++, cursor = cursor.superview) {
+
+        NSString *token =
+            YTLGNormalizedViewToken(cursor);
+
+        for (NSString *needle in needles) {
+            if ([token containsString:needle]) {
+                return YES;
+            }
+        }
+    }
+
+    return NO;
+}
+
+static BOOL
+YTLGInsideExcludedMediaOrShareUI(
+    UIView *view
+) {
+    return YTLGViewOrAncestorContainsAny(
+        view,
+        @[
+            @"reel_overlay",
+            @"shortsplayer",
+            @"shorts_player",
+            @"fullscreen",
+            @"videooverlay",
+            @"video_overlay",
+            @"controls_overlay",
+            @"playeroverlay",
+            @"watchcontroller",
+            @"uiactivityviewcontroller",
+            @"activityviewcontroller"
+        ]
+    );
+}
+
+static BOOL
+YTLGViewHasCompactActionGeometry(
+    UIView *view,
+    CGFloat minimumWidth,
+    CGFloat maximumWidth
+) {
+    if (!view ||
+        view.hidden ||
+        view.alpha <= 0.01 ||
+        CGRectIsEmpty(view.bounds)) {
+        return NO;
+    }
+
+    CGFloat width =
+        CGRectGetWidth(view.bounds);
+
+    CGFloat height =
+        CGRectGetHeight(view.bounds);
+
+    return
+        height >= 28.0 &&
+        height <= 68.0 &&
+        width >= minimumWidth &&
+        width <= maximumWidth;
+}
+
+static BOOL
+YTLGLabelStartsWith(
+    NSString *label,
+    NSString *prefix
+) {
+    if (label.length == 0 ||
+        prefix.length == 0) {
+        return NO;
+    }
+
+    return
+        [label hasPrefix:prefix] ||
+        [label isEqualToString:prefix];
+}
+
+static YTLGScopedSurfaceKind
+YTLGScopedSurfaceKindForElementsView(
+    UIView *view
+) {
+    if (!view ||
+        !view.window ||
+        YTLGInsideExcludedMediaOrShareUI(view)) {
+        return YTLGScopedSurfaceNone;
+    }
+
+    NSString *label =
+        YTLGTrimmedLowerLabel(view);
+
+    NSString *token =
+        YTLGNormalizedViewToken(view);
+
+    // ---- You/Profile standalone CTA buttons ----
+    //
+    // These labels are intentionally exact/tightly prefixed. This prevents
+    // another global-pill regression.
+    if (YTLGViewHasCompactActionGeometry(
+            view,
+            60.0,
+            360.0)) {
+
+        if ([label isEqualToString:@"create a channel"] ||
+            [label isEqualToString:@"get premium"]) {
+
+            return YTLGScopedSurfaceProminent;
+        }
+
+        if ([label isEqualToString:@"accounts"] ||
+            [label isEqualToString:@"view channel"] ||
+            [label isEqualToString:@"youtube music"] ||
+            [label isEqualToString:@"join"] ||
+            [label hasPrefix:@"join "]) {
+
+            return YTLGScopedSurfaceRegular;
+        }
+    }
+
+    // ---- Channel/profile Subscribe CTA ----
+    //
+    // Do not touch the normal watch-page Subscribe row. Require channel/profile
+    // ancestry and explicitly reject slim/watch metadata containers.
+    BOOL channelContext =
+        YTLGViewOrAncestorContainsAny(
+            view,
+            @[
+                @"channel",
+                @"profile",
+                @"c4",
+                @"identity",
+                @"creator",
+                @"page_header",
+                @"pageheader",
+                @"browse_header",
+                @"browseheader"
+            ]
+        );
+
+    BOOL watchContext =
+        YTLGViewOrAncestorContainsAny(
+            view,
+            @[
+                @"slimvideo",
+                @"watchmetadata",
+                @"watch_metadata",
+                @"action_bar",
+                @"actionbar"
+            ]
+        );
+
+    if (channelContext &&
+        !watchContext &&
+        YTLGViewHasCompactActionGeometry(
+            view,
+            64.0,
+            360.0) &&
+        (YTLGLabelStartsWith(label, @"subscribe") ||
+         [token containsString:@"subscribe_button"])) {
+
+        return YTLGScopedSurfaceProminent;
+    }
+
+    // ---- Comment controls ----
+    //
+    // Only compact controls inside a comment hierarchy. Small inline "Reply"
+    // text links are below the 28pt minimum and therefore remain untouched.
+    BOOL commentContext =
+        YTLGViewOrAncestorContainsAny(
+            view,
+            @[
+                @"comment",
+                @"comments"
+            ]
+        );
+
+    if (commentContext &&
+        YTLGViewHasCompactActionGeometry(
+            view,
+            28.0,
+            180.0) &&
+        ([token containsString:@"sort"] ||
+         [token containsString:@"filter"] ||
+         [token containsString:@"send"] ||
+         [token containsString:@"reply"])) {
+
+        return
+            CGRectGetWidth(view.bounds) <= 56.0
+                ? YTLGScopedSurfaceCompactCircle
+                : YTLGScopedSurfaceRegular;
+    }
+
+    // ---- Search filter button ----
+    //
+    // This is purposely NOT the large "Search filters" header from our failed
+    // broad-pill experiment. Only compact controls inside Search qualify.
+    BOOL searchContext =
+        YTLGViewOrAncestorContainsAny(
+            view,
+            @[
+                @"search"
+            ]
+        );
+
+    if (searchContext &&
+        YTLGViewHasCompactActionGeometry(
+            view,
+            28.0,
+            180.0) &&
+        ([token containsString:@"filter"] ||
+         [label isEqualToString:@"filter"])) {
+
+        return
+            CGRectGetWidth(view.bounds) <= 56.0
+                ? YTLGScopedSurfaceCompactCircle
+                : YTLGScopedSurfaceRegular;
+    }
+
+    // ---- Create/upload action rows fallback ----
+    //
+    // Ordinary YouTube action-sheet based create menus are already translated
+    // to native UIMenu/UIAction by YTLiquidGlassNativeActionMenus. This catches
+    // newer Elements-backed create rows only when they are clearly inside a
+    // creation flow.
+    BOOL createContext =
+        YTLGViewOrAncestorContainsAny(
+            view,
+            @[
+                @"create",
+                @"creation",
+                @"upload"
+            ]
+        );
+
+    if (createContext &&
+        YTLGViewHasCompactActionGeometry(
+            view,
+            44.0,
+            320.0) &&
+        ([label containsString:@"upload"] ||
+         [label containsString:@"create"] ||
+         [label containsString:@"go live"] ||
+         [label containsString:@"post"])) {
+
+        return YTLGScopedSurfaceRegular;
+    }
+
+    return YTLGScopedSurfaceNone;
+}
+
+static UIVisualEffectView *
+YTLGScopedGlassView(
+    UIView *owner,
+    const void *key,
+    BOOL prominent,
+    NSString *identifier
+) {
+    if (!owner) return nil;
+
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            owner,
+            key
+        );
+
+    if (!glass) {
+        glass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:
+                    YTLGScopedGlassEffect(
+                        prominent
+                    )];
+
+        glass.userInteractionEnabled = NO;
+        glass.opaque = NO;
+        glass.backgroundColor =
+            UIColor.clearColor;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+        glass.accessibilityIdentifier =
+            identifier;
+
+        objc_setAssociatedObject(
+            owner,
+            key,
+            glass,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
+    }
+
+    if (glass.superview != owner) {
+        [glass removeFromSuperview];
+        [owner insertSubview:glass
+                     atIndex:0];
+    } else {
+        [owner sendSubviewToBack:glass];
+    }
+
+    if (@available(iOS 26.0, *)) {
+        if ([glass.effect
+                isKindOfClass:
+                    NSClassFromString(@"UIGlassEffect")]) {
+
+            UIGlassEffect *effect =
+                (UIGlassEffect *)glass.effect;
+
+            effect.tintColor =
+                prominent
+                    ? [UIColor.labelColor
+                        colorWithAlphaComponent:0.10]
+                    : nil;
+        }
+    }
+
+    return glass;
+}
+
+static void
+YTLGHideScopedGlassIfPresent(
+    UIView *owner,
+    const void *key
+) {
+    UIVisualEffectView *glass =
+        objc_getAssociatedObject(
+            owner,
+            key
+        );
+
+    if (glass) {
+        glass.hidden = YES;
+    }
+}
+
+static void
+YTLGApplyScopedElementsGlass(
+    UIView *view
+) {
+    YTLGScopedSurfaceKind kind =
+        YTLGScopedSurfaceKindForElementsView(
+            view
+        );
+
+    if (kind == YTLGScopedSurfaceNone) {
+        YTLGHideScopedGlassIfPresent(
+            view,
+            kYTLGScopedElementGlassKey
+        );
+        return;
+    }
+
+    BOOL prominent =
+        kind ==
+            YTLGScopedSurfaceProminent;
+
+    UIVisualEffectView *glass =
+        YTLGScopedGlassView(
+            view,
+            kYTLGScopedElementGlassKey,
+            prominent,
+            @"YTLiquidGlass.ScopedElement"
+        );
+
+    glass.hidden = NO;
+
+    CGRect bounds =
+        view.bounds;
+
+    if (kind ==
+        YTLGScopedSurfaceCompactCircle) {
+
+        CGFloat side =
+            MIN(
+                46.0,
+                MAX(
+                    36.0,
+                    MIN(
+                        CGRectGetWidth(bounds),
+                        CGRectGetHeight(bounds)
+                    )
+                )
+            );
+
+        glass.frame =
+            CGRectMake(
+                CGRectGetMidX(bounds) -
+                    side * 0.5,
+                CGRectGetMidY(bounds) -
+                    side * 0.5,
+                side,
+                side
+            );
+
+        glass.layer.cornerRadius =
+            side * 0.5;
+    } else {
+        CGRect frame =
+            CGRectInset(
+                bounds,
+                0.5,
+                1.0
+            );
+
+        glass.frame = frame;
+        glass.layer.cornerRadius =
+            CGRectGetHeight(frame) *
+            0.5;
+    }
+
+    view.opaque = NO;
+    view.backgroundColor =
+        UIColor.clearColor;
+    view.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    [view sendSubviewToBack:glass];
+}
+
+%group YTLiquidGlassScopedElements
+
+%hook _ASDisplayView
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGApplyScopedElementsGlass(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGApplyScopedElementsGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+- (void)setAccessibilityIdentifier:
+    (NSString *)identifier {
+
+    %orig(identifier);
+
+    if (self.window) {
+        YTLGApplyScopedElementsGlass(
+            self
+        );
+    }
+}
+
+- (void)setAccessibilityLabel:
+    (NSString *)label {
+
+    %orig(label);
+
+    if (self.window) {
+        YTLGApplyScopedElementsGlass(
+            self
+        );
+    }
+}
+
+%end
+
+%end
+
+
+#pragma mark - One-piece top category/topic rail glass
+
+static void
+YTLGUpdateChipRailGlass(
+    UIView *cell
+) {
+    if (!cell ||
+        !cell.window ||
+        cell.hidden ||
+        cell.alpha <= 0.01 ||
+        CGRectIsEmpty(cell.bounds)) {
+        return;
+    }
+
+    CGFloat height =
+        CGRectGetHeight(
+            cell.bounds
+        );
+
+    // This class is also reused internally. Only the compact horizontal chip
+    // rail should receive one continuous glass strip.
+    if (height < 32.0 ||
+        height > 84.0) {
+
+        YTLGHideScopedGlassIfPresent(
+            cell,
+            kYTLGChipRailGlassKey
+        );
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGScopedGlassView(
+            cell,
+            kYTLGChipRailGlassKey,
+            NO,
+            @"YTLiquidGlass.TopicRail"
+        );
+
+    CGRect frame =
+        CGRectInset(
+            cell.bounds,
+            6.0,
+            3.0
+        );
+
+    if (CGRectGetWidth(frame) <= 0.0 ||
+        CGRectGetHeight(frame) <= 0.0) {
+        return;
+    }
+
+    glass.hidden = NO;
+    glass.frame = frame;
+    glass.layer.cornerRadius =
+        MIN(
+            22.0,
+            CGRectGetHeight(frame) *
+                0.5
+        );
+
+    // Preserve individual YouTube chip selection states; only replace the rail
+    // backing with one system material.
+    cell.opaque = NO;
+    cell.backgroundColor =
+        UIColor.clearColor;
+    cell.layer.backgroundColor =
+        UIColor.clearColor.CGColor;
+
+    [cell sendSubviewToBack:glass];
+}
+
+%group YTLiquidGlassTopicRail
+
+%hook YTChipCloudCell
+
+- (void)layoutSubviews {
+    %orig;
+
+    YTLGUpdateChipRailGlass(
+        self
+    );
+}
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (self.window) {
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+                if (self.window) {
+                    YTLGUpdateChipRailGlass(
+                        self
+                    );
+                }
+            }
+        );
+    }
+}
+
+%end
+
+%end
+
+
+#pragma mark - YTKACE settings standalone control glass
+
+static BOOL
+YTLGViewIsInsideTableCell(
+    UIView *view
+) {
+    for (UIView *cursor = view.superview;
+         cursor;
+         cursor = cursor.superview) {
+
+        if ([cursor
+                isKindOfClass:
+                    UITableViewCell.class] ||
+            [cursor
+                isKindOfClass:
+                    UICollectionViewCell.class]) {
+
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static void
+YTLGApplyYTKACEButtonGlass(
+    UIButton *button
+) {
+    if (!button ||
+        !button.window ||
+        button.hidden ||
+        button.alpha <= 0.01 ||
+        CGRectIsEmpty(button.bounds) ||
+        YTLGViewIsInsideTableCell(button)) {
+        return;
+    }
+
+    CGFloat width =
+        CGRectGetWidth(
+            button.bounds
+        );
+
+    CGFloat height =
+        CGRectGetHeight(
+            button.bounds
+        );
+
+    if (height < 28.0 ||
+        height > 60.0 ||
+        width < 28.0 ||
+        width > 260.0) {
+        return;
+    }
+
+    UIVisualEffectView *glass =
+        YTLGScopedGlassView(
+            button,
+            kYTLGYTKACEControlGlassKey,
+            NO,
+            @"YTLiquidGlass.YTKACEControl"
+        );
+
+    glass.hidden = NO;
+    glass.frame =
+        button.bounds;
+
+    glass.layer.cornerRadius =
+        width <= height * 1.25
+            ? MIN(width, height) * 0.5
+            : height * 0.5;
+
+    button.opaque = NO;
+    button.backgroundColor =
+        UIColor.clearColor;
+
+    [button sendSubviewToBack:glass];
+}
+
+static void
+YTLGStyleYTKACEStandaloneControls(
+    UIView *root
+) {
+    if (!root) return;
+
+    NSMutableArray<UIView *> *stack =
+        [NSMutableArray
+            arrayWithObject:root];
+
+    NSUInteger visited = 0;
+
+    while (stack.count > 0 &&
+           visited < 500) {
+
+        UIView *view =
+            stack.lastObject;
+
+        [stack removeLastObject];
+        visited++;
+
+        if ([view
+                isKindOfClass:
+                    UIButton.class]) {
+
+            YTLGApplyYTKACEButtonGlass(
+                (UIButton *)view
+            );
+        }
+
+        for (UIView *subview
+                in view.subviews) {
+            [stack addObject:subview];
+        }
+    }
+}
+
+%group YTLiquidGlassYTKACERootSettings
+
+%hook YTKACERootOptionsController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+
+    YTLGStyleYTKACEStandaloneControls(
+        self.view
+    );
+}
+
+%end
+
+%end
+
+
+%group YTLiquidGlassYTKACETabEditor
+
+%hook YTKACETabEditorController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+
+    YTLGStyleYTKACEStandaloneControls(
+        self.view
+    );
+}
+
+%end
+
+%end
+
+
+%group YTLiquidGlassYTKACESearchOverlay
+
+%hook YTKACESearchOverlayController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+
+    YTLGStyleYTKACEStandaloneControls(
+        self.view
+    );
+}
+
+%end
+
+%end
+
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         if (NSClassFromString(@"YTPivotBarView") &&
@@ -3204,6 +4090,36 @@ static BOOL YTLGTryPresentNativeSheetMenu(
             NSClassFromString(@"YTDefaultSheetController")) {
 
             %init(YTLiquidGlassNativeActionMenus);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"_ASDisplayView")) {
+
+            %init(YTLiquidGlassScopedElements);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTChipCloudCell")) {
+
+            %init(YTLiquidGlassTopicRail);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTKACERootOptionsController")) {
+
+            %init(YTLiquidGlassYTKACERootSettings);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTKACETabEditorController")) {
+
+            %init(YTLiquidGlassYTKACETabEditor);
+        }
+
+        if (NSClassFromString(@"UIGlassEffect") &&
+            NSClassFromString(@"YTKACESearchOverlayController")) {
+
+            %init(YTLiquidGlassYTKACESearchOverlay);
         }
     }
 }
