@@ -1,4 +1,4 @@
-// YTLiquidGlass vNext — secondary rail input/lifecycle fixes; comments left stock
+// YTLiquidGlass vNext.1 — bottom-tab ghost/icon fixes + redesigned subscriptions rails
 // Retains only the implementations that were confirmed working:
 // native bottom tab bar, top-right header glass, search glass,
 // compact back buttons, and native UIKit action menus.
@@ -130,6 +130,11 @@ static const void *kYTLGRefreshingKey = &kYTLGRefreshingKey;
 
         self.accessibilityIdentifier =
             @"YTLiquidGlass.NativeTabBar";
+
+        // Keep monochrome tab glyphs readable regardless of the artwork that
+        // happens to be moving underneath the floating Liquid Glass bar.
+        self.tintColor = UIColor.systemBlueColor;
+        self.unselectedItemTintColor = UIColor.labelColor;
     }
     return self;
 }
@@ -481,6 +486,25 @@ YTLGAncestorPivotBar(UIView *view) {
     return nil;
 }
 
+static BOOL
+YTLGShouldSuppressOriginalPivotItem(
+    YTPivotBarItemView *item
+) {
+    YTPivotBarView *bar =
+        YTLGAncestorPivotBar(item);
+
+    if (!bar) return NO;
+
+    YTLGNativeTabBar *nativeBar =
+        objc_getAssociatedObject(
+            bar,
+            kYTLGNativeBarKey
+        );
+
+    return nativeBar != nil;
+}
+
+
 #pragma mark - Native item appearance
 
 static BOOL
@@ -574,17 +598,16 @@ YTLGNativeImage(UIImage *image, BOOL preserveOriginal) {
         return nil;
     }
 
-    if (preserveOriginal ||
-        image.renderingMode ==
-            UIImageRenderingModeAlwaysOriginal) {
-
+    // Only thumbnail-backed items (for example the account/avatar tab) should
+    // preserve original colours. Some custom YouTube/YTLite glyphs arrive as
+    // AlwaysOriginal even though they are monochrome navigation icons; keeping
+    // that flag is what can make icons such as Downloads render black.
+    if (preserveOriginal) {
         return [image
             imageWithRenderingMode:
                 UIImageRenderingModeAlwaysOriginal];
     }
 
-    // Normal tab glyphs stay template images so UIKit's native Liquid Glass
-    // bar can apply adaptive selected/unselected coloring.
     return [image
         imageWithRenderingMode:
             UIImageRenderingModeAlwaysTemplate];
@@ -831,11 +854,27 @@ static void YTLGSuppressOriginalChrome(
     for (YTPivotBarItemView *item
             in YTLGAllItemViews(bar)) {
 
+        // YouTube sometimes writes alpha back during feed/renderer updates.
+        // Hide the original pivot item at both UIView and CALayer level so it
+        // cannot ghost through the native Liquid Glass bar for a frame.
+        item.hidden = YES;
         item.alpha = 0.0;
+        item.layer.opacity = 0.0;
         item.userInteractionEnabled = NO;
         item.opaque = NO;
         item.backgroundColor =
             UIColor.clearColor;
+
+        UIButton *originalButton =
+            item.navigationButton;
+
+        if ([originalButton
+                isKindOfClass:UIButton.class]) {
+            originalButton.hidden = YES;
+            originalButton.alpha = 0.0;
+            originalButton.layer.opacity = 0.0;
+            originalButton.userInteractionEnabled = NO;
+        }
     }
 
     nativeBar.hidden = NO;
@@ -1345,6 +1384,25 @@ static void YTLGInstallForController(
 %end
 
 %hook YTPivotBarItemView
+
+- (void)setAlpha:(CGFloat)alpha {
+    if (YTLGShouldSuppressOriginalPivotItem(self)) {
+        %orig(0.0);
+        self.layer.opacity = 0.0;
+        return;
+    }
+
+    %orig(alpha);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    if (YTLGShouldSuppressOriginalPivotItem(self)) {
+        %orig(YES);
+        return;
+    }
+
+    %orig(hidden);
+}
 
 - (void)setRenderer:(id)renderer {
     %orig(renderer);
@@ -4241,93 +4299,460 @@ static UICollectionView *YTLGRailCollection(UIView *view) {
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *suppressedViews;
 @property(nonatomic, strong) NSMapTable<CALayer *, NSNumber *> *suppressedLayers;
 @property(nonatomic, strong) NSMapTable<UIScrollView *, NSNumber *> *scrollCancellation;
+@property(nonatomic, strong) UIVisualEffectView *railGlass;
+@property(nonatomic, strong) UIVisualEffectView *selectionGlass;
+@property(nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedback;
 @property(nonatomic, assign) CGPoint trackingOrigin;
 @property(nonatomic, assign) NSInteger trackingOriginalIndex;
 @property(nonatomic, assign) BOOL yieldingToScroll;
+@property(nonatomic, assign) BOOL userTrackingSelection;
 @property(nonatomic, assign) CFTimeInterval pendingUntil;
 - (void)restoreSources;
 - (void)suppress:(UIView *)view;
 - (void)selectionChanged;
+- (void)updateGlassGeometryAnimated:(BOOL)animated;
+- (void)commitSelectedIndex;
 @end
 
 @implementation YTLGNativeSecondaryRail
+
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
-        self.accessibilityIdentifier = @"YTLiquidGlass.NativeSecondaryRail";
-        self.apportionsSegmentWidthsByContent = YES;
-        [self setTitleTextAttributes:@{NSFontAttributeName:
-            [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]} forState:UIControlStateNormal];
-        self.suppressedViews = [NSMapTable weakToStrongObjectsMapTable];
-        self.suppressedLayers = [NSMapTable weakToStrongObjectsMapTable];
-        self.scrollCancellation = [NSMapTable weakToStrongObjectsMapTable];
-        [self addTarget:self action:@selector(selectionChanged)
-            forControlEvents:UIControlEventValueChanged];
-        // Leave background/selected tint images unset: UIKit supplies the
-        // system material, selection lens and touch/drag tracking.
+        self.accessibilityIdentifier =
+            @"YTLiquidGlass.NativeSecondaryRail";
+
+        // We keep UISegmentedControl for its accessibility and native touch
+        // semantics, but remove its legacy individual pill chrome. Two real
+        // UIGlassEffect surfaces below provide one continuous rail + lens.
+        self.apportionsSegmentWidthsByContent = NO;
+        self.backgroundColor = UIColor.clearColor;
+        self.selectedSegmentTintColor = UIColor.clearColor;
+        self.opaque = NO;
+        self.clipsToBounds = NO;
+
+        UIGraphicsBeginImageContextWithOptions(
+            CGSizeMake(1.0, 1.0),
+            NO,
+            0.0
+        );
+        UIImage *transparent =
+            UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+
+        for (NSNumber *state in @[
+                @(UIControlStateNormal),
+                @(UIControlStateSelected),
+                @(UIControlStateHighlighted),
+                @(UIControlStateDisabled)]) {
+            [self setBackgroundImage:transparent
+                            forState:state.unsignedIntegerValue
+                          barMetrics:UIBarMetricsDefault];
+        }
+
+        [self setDividerImage:transparent
+          forLeftSegmentState:UIControlStateNormal
+            rightSegmentState:UIControlStateNormal
+                   barMetrics:UIBarMetricsDefault];
+        [self setDividerImage:transparent
+          forLeftSegmentState:UIControlStateSelected
+            rightSegmentState:UIControlStateNormal
+                   barMetrics:UIBarMetricsDefault];
+        [self setDividerImage:transparent
+          forLeftSegmentState:UIControlStateNormal
+            rightSegmentState:UIControlStateSelected
+                   barMetrics:UIBarMetricsDefault];
+
+        UIFont *font =
+            [UIFont systemFontOfSize:13.0
+                              weight:UIFontWeightMedium];
+
+        [self setTitleTextAttributes:@{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName:
+                [UIColor.labelColor colorWithAlphaComponent:0.86]
+        } forState:UIControlStateNormal];
+
+        [self setTitleTextAttributes:@{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName:
+                UIColor.systemBlueColor
+        } forState:UIControlStateSelected];
+
+        UIVisualEffect *backgroundEffect =
+            YTLGScopedGlassEffect(NO);
+
+        if (@available(iOS 26.0, *)) {
+            if ([backgroundEffect
+                    isKindOfClass:
+                        NSClassFromString(@"UIGlassEffect")]) {
+                ((UIGlassEffect *)backgroundEffect).tintColor =
+                    [UIColor.blackColor colorWithAlphaComponent:0.06];
+            }
+        }
+
+        self.railGlass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:backgroundEffect];
+        self.railGlass.accessibilityIdentifier =
+            @"YTLiquidGlass.SecondaryRailBackground";
+        self.railGlass.userInteractionEnabled = NO;
+        self.railGlass.opaque = NO;
+        self.railGlass.backgroundColor = UIColor.clearColor;
+        self.railGlass.clipsToBounds = YES;
+        self.railGlass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+        self.railGlass.layer.borderWidth = 0.5;
+        self.railGlass.layer.borderColor =
+            [UIColor.whiteColor colorWithAlphaComponent:0.08].CGColor;
+
+        self.selectionGlass =
+            [[UIVisualEffectView alloc]
+                initWithEffect:YTLGScopedGlassEffect(YES)];
+        self.selectionGlass.accessibilityIdentifier =
+            @"YTLiquidGlass.SecondaryRailSelection";
+        self.selectionGlass.userInteractionEnabled = NO;
+        self.selectionGlass.opaque = NO;
+        self.selectionGlass.backgroundColor = UIColor.clearColor;
+        self.selectionGlass.clipsToBounds = YES;
+        self.selectionGlass.layer.cornerCurve =
+            kCACornerCurveContinuous;
+        self.selectionGlass.hidden = YES;
+
+        [self insertSubview:self.railGlass atIndex:0];
+        [self insertSubview:self.selectionGlass atIndex:1];
+
+        self.suppressedViews =
+            [NSMapTable weakToStrongObjectsMapTable];
+        self.suppressedLayers =
+            [NSMapTable weakToStrongObjectsMapTable];
+        self.scrollCancellation =
+            [NSMapTable weakToStrongObjectsMapTable];
+        self.selectionFeedback =
+            [[UISelectionFeedbackGenerator alloc] init];
+
+        [self addTarget:self
+                 action:@selector(selectionChanged)
+       forControlEvents:UIControlEventValueChanged];
     }
     return self;
 }
+
+- (CGRect)frameForSegmentIndex:(NSInteger)index {
+    if (index < 0 ||
+        index >= self.numberOfSegments ||
+        CGRectIsEmpty(self.bounds)) {
+        return CGRectZero;
+    }
+
+    CGFloat x = 0.0;
+
+    for (NSInteger i = 0;
+         i < self.numberOfSegments;
+         i++) {
+        CGFloat width =
+            [self widthForSegmentAtIndex:i];
+
+        if (width <= 0.0) {
+            width =
+                CGRectGetWidth(self.bounds) /
+                MAX(1, self.numberOfSegments);
+        }
+
+        if (i == index) {
+            return CGRectMake(
+                x,
+                0.0,
+                width,
+                CGRectGetHeight(self.bounds)
+            );
+        }
+
+        x += width;
+    }
+
+    return CGRectZero;
+}
+
+- (NSInteger)segmentIndexAtPoint:(CGPoint)point {
+    for (NSInteger i = 0;
+         i < self.numberOfSegments;
+         i++) {
+        if (CGRectContainsPoint(
+                [self frameForSegmentIndex:i],
+                point)) {
+            return i;
+        }
+    }
+
+    return UISegmentedControlNoSegment;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    self.railGlass.frame =
+        CGRectInset(self.bounds, 0.5, 0.5);
+    self.railGlass.layer.cornerRadius =
+        MIN(20.0,
+            CGRectGetHeight(self.railGlass.frame) * 0.5);
+
+    // UISegmentedControl may rebuild its private subviews. Reinsert both glass
+    // surfaces underneath its labels/icons on every layout pass.
+    [self insertSubview:self.railGlass atIndex:0];
+    [self insertSubview:self.selectionGlass
+                atIndex:MIN((NSUInteger)1,
+                            self.subviews.count)];
+
+    [self updateGlassGeometryAnimated:NO];
+}
+
+- (void)updateGlassGeometryAnimated:(BOOL)animated {
+    NSInteger index = self.selectedSegmentIndex;
+
+    if (index == UISegmentedControlNoSegment ||
+        index < 0 ||
+        index >= self.numberOfSegments) {
+        self.selectionGlass.hidden = YES;
+        return;
+    }
+
+    CGRect frame =
+        CGRectInset(
+            [self frameForSegmentIndex:index],
+            2.0,
+            2.0
+        );
+
+    if (CGRectIsEmpty(frame)) {
+        self.selectionGlass.hidden = YES;
+        return;
+    }
+
+    void (^changes)(void) = ^{
+        self.selectionGlass.hidden = NO;
+        self.selectionGlass.frame = frame;
+        self.selectionGlass.layer.cornerRadius =
+            CGRectGetHeight(frame) * 0.5;
+    };
+
+    if (animated &&
+        !UIAccessibilityIsReduceMotionEnabled()) {
+        [UIView animateWithDuration:0.16
+                              delay:0.0
+                            options:
+            UIViewAnimationOptionBeginFromCurrentState |
+            UIViewAnimationOptionCurveEaseInOut |
+            UIViewAnimationOptionAllowUserInteraction
+                         animations:changes
+                         completion:nil];
+    } else {
+        [UIView performWithoutAnimation:changes];
+    }
+
+    [self insertSubview:self.railGlass atIndex:0];
+    [self insertSubview:self.selectionGlass
+                atIndex:MIN((NSUInteger)1,
+                            self.subviews.count)];
+}
+
 - (void)suppress:(UIView *)view {
-    if (!view || view == self || YTLGIsOurView(view)) return;
-    if (![self.suppressedViews objectForKey:view])
-        [self.suppressedViews setObject:@(view.alpha) forKey:view];
-    if (view.alpha != 0) view.alpha = 0;
+    if (!view ||
+        view == self ||
+        YTLGIsOurView(view)) {
+        return;
+    }
+
+    if (![self.suppressedViews objectForKey:view]) {
+        [self.suppressedViews
+            setObject:@(view.alpha)
+               forKey:view];
+    }
+
+    if (![self.suppressedLayers objectForKey:view.layer]) {
+        [self.suppressedLayers
+            setObject:@(view.layer.opacity)
+               forKey:view.layer];
+    }
+
+    // The recording showed original Texture labels reappearing underneath the
+    // native rail. Suppress both the UIView and backing layer to prevent the
+    // one-frame ghost when YouTube refreshes a reused cell.
+    view.alpha = 0.0;
+    view.layer.opacity = 0.0;
 }
-- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    self.trackingOrigin = [touch locationInView:self];
-    self.trackingOriginalIndex = self.selectedSegmentIndex;
+
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch
+                     withEvent:(UIEvent *)event {
+    self.trackingOrigin =
+        [touch locationInView:self];
+    self.trackingOriginalIndex =
+        self.selectedSegmentIndex;
     self.yieldingToScroll = NO;
-    return [super beginTrackingWithTouch:touch withEvent:event];
+    self.userTrackingSelection = YES;
+    [self.selectionFeedback prepare];
+
+    BOOL result =
+        [super beginTrackingWithTouch:touch
+                            withEvent:event];
+    [self updateGlassGeometryAnimated:NO];
+    return result;
 }
-- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch
+                        withEvent:(UIEvent *)event {
     CGPoint point = [touch locationInView:self];
     CGFloat dx = fabs(point.x - self.trackingOrigin.x);
     CGFloat dy = fabs(point.y - self.trackingOrigin.y);
-    if (dy > 10 && dy > dx * 1.2) {
+
+    if (dy > 10.0 && dy > dx * 1.2) {
         self.yieldingToScroll = YES;
         [super cancelTrackingWithEvent:event];
-        self.selectedSegmentIndex = self.trackingOriginalIndex;
-        self.pendingUntil = 0;
+
+        [UIView performWithoutAnimation:^{
+            self.selectedSegmentIndex =
+                self.trackingOriginalIndex;
+        }];
+
+        self.pendingUntil = 0.0;
+        self.userTrackingSelection = NO;
+        [self updateGlassGeometryAnimated:NO];
         return NO;
     }
-    return [super continueTrackingWithTouch:touch withEvent:event];
+
+    BOOL result =
+        [super continueTrackingWithTouch:touch
+                               withEvent:event];
+
+    // Preview the same moving selection-lens interaction as the native bottom
+    // tab bar, but do not reload YouTube for every intermediate segment.
+    NSInteger hover =
+        [self segmentIndexAtPoint:point];
+
+    if (hover != UISegmentedControlNoSegment &&
+        hover != self.selectedSegmentIndex &&
+        [self isEnabledForSegmentAtIndex:hover]) {
+        self.selectedSegmentIndex = hover;
+        [self.selectionFeedback selectionChanged];
+        [self.selectionFeedback prepare];
+        [self updateGlassGeometryAnimated:YES];
+    }
+
+    return result;
 }
+
+- (void)endTrackingWithTouch:(UITouch *)touch
+                   withEvent:(UIEvent *)event {
+    BOOL yielded = self.yieldingToScroll;
+
+    // Keep userTrackingSelection true while UIKit finishes touch-up so a
+    // valueChanged emitted by super does not dispatch the source twice.
+    [super endTrackingWithTouch:touch
+                      withEvent:event];
+
+    self.userTrackingSelection = NO;
+
+    if (!yielded) {
+        [self commitSelectedIndex];
+    }
+
+    [self updateGlassGeometryAnimated:YES];
+}
+
+- (void)cancelTrackingWithEvent:(UIEvent *)event {
+    [super cancelTrackingWithEvent:event];
+    self.userTrackingSelection = NO;
+    self.yieldingToScroll = NO;
+
+    [UIView performWithoutAnimation:^{
+        self.selectedSegmentIndex =
+            self.trackingOriginalIndex;
+    }];
+
+    [self updateGlassGeometryAnimated:NO];
+}
+
 - (void)restoreSources {
-    for (UIView *view in self.suppressedViews.keyEnumerator)
-        view.alpha = [[self.suppressedViews objectForKey:view] doubleValue];
+    for (UIView *view in self.suppressedViews.keyEnumerator) {
+        view.alpha =
+            [[self.suppressedViews objectForKey:view]
+                doubleValue];
+    }
     [self.suppressedViews removeAllObjects];
-    for (CALayer *layer in self.suppressedLayers.keyEnumerator)
-        layer.opacity = [[self.suppressedLayers objectForKey:layer] floatValue];
+
+    for (CALayer *layer in self.suppressedLayers.keyEnumerator) {
+        layer.opacity =
+            [[self.suppressedLayers objectForKey:layer]
+                floatValue];
+    }
     [self.suppressedLayers removeAllObjects];
-    for (UIScrollView *scroll in self.scrollCancellation.keyEnumerator)
-        scroll.canCancelContentTouches = [[self.scrollCancellation objectForKey:scroll] boolValue];
+
+    for (UIScrollView *scroll in self.scrollCancellation.keyEnumerator) {
+        scroll.canCancelContentTouches =
+            [[self.scrollCancellation objectForKey:scroll]
+                boolValue];
+    }
     [self.scrollCancellation removeAllObjects];
 }
+
 - (void)selectionChanged {
+    if (self.userTrackingSelection) {
+        [self updateGlassGeometryAnimated:YES];
+        return;
+    }
+
+    [self commitSelectedIndex];
+}
+
+- (void)commitSelectedIndex {
     if (self.yieldingToScroll) return;
+
     NSInteger index = self.selectedSegmentIndex;
-    if (index < 0 || index >= (NSInteger)self.sourceViews.count) return;
+    if (index < 0 ||
+        index >= (NSInteger)self.sourceViews.count) {
+        return;
+    }
+
     UIView *source = self.sourceViews[index];
     BOOL sent = NO;
     self.pendingUntil = CACurrentMediaTime() + 0.45;
     UICollectionView *collection = self.sourceCollection;
     BOOL current = YES;
+
     if (collection) {
-        NSIndexPath *currentPath = [source isKindOfClass:UICollectionViewCell.class]
-            ? [collection indexPathForCell:(UICollectionViewCell *)source] : nil;
-        current = index < (NSInteger)self.sourcePaths.count && currentPath &&
+        NSIndexPath *currentPath =
+            [source isKindOfClass:UICollectionViewCell.class]
+            ? [collection indexPathForCell:(UICollectionViewCell *)source]
+            : nil;
+
+        current =
+            index < (NSInteger)self.sourcePaths.count &&
+            currentPath &&
             [currentPath isEqual:self.sourcePaths[index]];
     }
-    if (current) sent = YTLGActivateRailSource(source);
+
+    if (current) {
+        sent = YTLGActivateRailSource(source);
+    }
+
     if (!sent) {
-        // A changed YouTube hierarchy must leave the original controls usable.
+        // If YouTube changes the renderer hierarchy, fail open to the stock
+        // controls instead of leaving an unresponsive glass rail on screen.
         [self restoreSources];
         self.hidden = YES;
+        return;
     }
+
     __weak UIView *root = self.sourceRoot;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-        dispatch_get_main_queue(), ^{ [root setNeedsLayout]; });
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(0.5 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(),
+        ^{
+            [root setNeedsLayout];
+        }
+    );
 }
+
 @end
 
 static void YTLGCollectTabSources(UIView *view, NSMutableArray<UIView *> *items) {
@@ -4447,14 +4872,25 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
     // on every layout pass can trigger a new layout while the feed is scrolling.
     NSMutableSet *keptViews = [NSMutableSet setWithArray:sources];
     [keptViews addObjectsFromArray:indicators];
+
+    NSMutableSet *keptLayers =
+        [NSMutableSet setWithArray:indicatorLayers];
+
+    for (UIView *source in sources) {
+        if (source.layer) {
+            [keptLayers addObject:source.layer];
+        }
+    }
+
     for (UIView *oldView in rail.suppressedViews.keyEnumerator.allObjects) {
         if (![keptViews containsObject:oldView]) {
             oldView.alpha = [[rail.suppressedViews objectForKey:oldView] doubleValue];
             [rail.suppressedViews removeObjectForKey:oldView];
         }
     }
+
     for (CALayer *oldLayer in rail.suppressedLayers.keyEnumerator.allObjects) {
-        if (![indicatorLayers containsObject:oldLayer]) {
+        if (![keptLayers containsObject:oldLayer]) {
             oldLayer.opacity = [[rail.suppressedLayers objectForKey:oldLayer] floatValue];
             [rail.suppressedLayers removeObjectForKey:oldLayer];
         }
@@ -4469,18 +4905,40 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
             }
         }
     }
-    rail.sourceViews = sources; rail.sourcePaths = paths; rail.sourceCollection = collection;
+    rail.sourceViews = sources;
+    rail.sourcePaths = paths;
+    rail.sourceCollection = collection;
+
     if (changed) {
-        [rail removeAllSegments];
-        for (NSUInteger i = 0; i < titles.count; i++) {
-            if ([images[i] isKindOfClass:UIImage.class])
-                [rail insertSegmentWithImage:images[i] atIndex:i animated:NO];
-            else [rail insertSegmentWithTitle:titles[i] atIndex:i animated:NO];
-        }
-        rail.sourceTitles = titles; rail.sourceImages = images;
+        [UIView performWithoutAnimation:^{
+            [rail removeAllSegments];
+
+            for (NSUInteger i = 0; i < titles.count; i++) {
+                if ([images[i] isKindOfClass:UIImage.class]) {
+                    [rail insertSegmentWithImage:images[i]
+                                         atIndex:i
+                                        animated:NO];
+                } else {
+                    [rail insertSegmentWithTitle:titles[i]
+                                         atIndex:i
+                                        animated:NO];
+                }
+            }
+
+            [rail layoutIfNeeded];
+        }];
+
+        rail.sourceTitles = titles;
+        rail.sourceImages = images;
     }
-    if ((changed || CACurrentMediaTime() >= rail.pendingUntil) && rail.selectedSegmentIndex != selected)
-        rail.selectedSegmentIndex = selected;
+
+    if ((changed || CACurrentMediaTime() >= rail.pendingUntil) &&
+        rail.selectedSegmentIndex != selected) {
+        [UIView performWithoutAnimation:^{
+            rail.selectedSegmentIndex = selected;
+            [rail updateGlassGeometryAnimated:NO];
+        }];
+    }
     CGFloat height = MIN(34.0, CGRectGetHeight(root.bounds) - 6.0);
     if (height < 24.0) { rail.hidden = YES; return; }
     // A collection owns its scrolling/content coordinates. Its visible cells
@@ -4496,11 +4954,25 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
     if (!CGRectEqualToRect(rail.frame, frame)) rail.frame = frame;
     for (NSUInteger i = 0; i < sources.count; i++) {
         CGRect f = [sources[i] convertRect:sources[i].bounds toView:root];
-        // Preserve each source's geometry in the virtualized collection.
-        CGFloat width = collection ? CGRectGetWidth(f) :
-            ([images[i] isKindOfClass:UIImage.class] ? 34 : 0);
-        if (fabs([rail widthForSegmentAtIndex:i] - width) > 0.5)
+
+        // Match YouTube's real spacing. Using each cell's raw width alone left
+        // the selection lens slightly out of phase with the source chips.
+        CGFloat nextX = CGRectGetMaxX(unionFrame);
+
+        if (i + 1 < sources.count) {
+            CGRect nextFrame =
+                [sources[i + 1]
+                    convertRect:sources[i + 1].bounds
+                         toView:root];
+            nextX = CGRectGetMinX(nextFrame);
+        }
+
+        CGFloat width =
+            MAX(40.0, nextX - CGRectGetMinX(f));
+
+        if (fabs([rail widthForSegmentAtIndex:i] - width) > 0.5) {
             [rail setWidth:width forSegmentAtIndex:i];
+        }
         UIControl *action = collection ? nil : YTLGRailActionControl(sources[i]);
         BOOL enabled = action ? action.enabled :
             ((sources[i].accessibilityTraits & UIAccessibilityTraitNotEnabled) == 0);
@@ -4509,6 +4981,11 @@ static void YTLGUpdateNativeRailNow(UIView *root, NSArray<UIView *> *sources,
         [rail suppress:sources[i]];
     }
     for (UIView *indicator in indicators) [rail suppress:indicator];
+
+    [rail setNeedsLayout];
+    [rail layoutIfNeeded];
+    [rail updateGlassGeometryAnimated:NO];
+
     for (CALayer *layer in indicatorLayers) {
         if (![rail.suppressedLayers objectForKey:layer])
             [rail.suppressedLayers setObject:@(layer.opacity) forKey:layer];
@@ -4670,18 +5147,79 @@ static void YTLGRestoreSurface(UIView *view) {
     [colors removeAllObjects];
 }
 static void YTLGApplySubscriptionGlass(UIView *view, CGFloat radius) {
-    NSMapTable *colors = objc_getAssociatedObject(view, kYTLGSurfaceColorsKey);
+    if (!view ||
+        !view.window ||
+        CGRectIsEmpty(view.bounds)) {
+        return;
+    }
+
+    NSMapTable *colors =
+        objc_getAssociatedObject(
+            view,
+            kYTLGSurfaceColorsKey
+        );
+
     if (!colors) {
         colors = [NSMapTable weakToStrongObjectsMapTable];
-        objc_setAssociatedObject(view, kYTLGSurfaceColorsKey, colors, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(
+            view,
+            kYTLGSurfaceColorsKey,
+            colors,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        );
     }
+
     YTLGClearSurfaceFills(view, view, 0, colors);
-    UIVisualEffectView *glass = YTLGScopedGlassView(view, kYTLGSurfaceGlassKey,
-        NO, @"YTLiquidGlass.SubscriptionSurface");
-    CGRect frame = CGRectInset(view.bounds, 8, 2);
-    if (!CGRectEqualToRect(glass.frame, frame)) glass.frame = frame;
-    glass.layer.cornerRadius = MIN(radius, 16); glass.hidden = NO;
-    if (view.subviews.firstObject != glass) [view sendSubviewToBack:glass];
+
+    UIVisualEffectView *glass =
+        YTLGScopedGlassView(
+            view,
+            kYTLGSurfaceGlassKey,
+            NO,
+            @"YTLiquidGlass.SubscriptionSurface"
+        );
+
+    // A tighter floating tray looks intentional and avoids the large flat
+    // grey slab visible in the recording. The channel avatars/labels remain
+    // YouTube's own content and keep their original horizontal scrolling.
+    CGRect frame =
+        UIEdgeInsetsInsetRect(
+            view.bounds,
+            UIEdgeInsetsMake(6.0, 10.0, 6.0, 10.0)
+        );
+
+    if (CGRectGetWidth(frame) <= 0.0 ||
+        CGRectGetHeight(frame) <= 0.0) {
+        glass.hidden = YES;
+        return;
+    }
+
+    glass.hidden = NO;
+    glass.frame = frame;
+    glass.layer.cornerCurve = kCACornerCurveContinuous;
+    glass.layer.cornerRadius =
+        MIN(MAX(20.0, radius),
+            MIN(28.0, CGRectGetHeight(frame) * 0.5));
+    glass.layer.borderWidth = 0.5;
+    glass.layer.borderColor =
+        [UIColor.whiteColor colorWithAlphaComponent:0.09].CGColor;
+
+    if (@available(iOS 26.0, *)) {
+        if ([glass.effect
+                isKindOfClass:NSClassFromString(@"UIGlassEffect")]) {
+            ((UIGlassEffect *)glass.effect).tintColor =
+                [UIColor.blackColor colorWithAlphaComponent:0.055];
+        }
+    }
+
+    view.opaque = NO;
+    view.backgroundColor = UIColor.clearColor;
+    view.layer.backgroundColor = UIColor.clearColor.CGColor;
+    view.clipsToBounds = NO;
+
+    if (view.subviews.firstObject != glass) {
+        [view sendSubviewToBack:glass];
+    }
 }
 
 static const void *kYTLGAvatarOwnerKey = &kYTLGAvatarOwnerKey;
@@ -4689,15 +5227,34 @@ static void YTLGStyleAvatarCollection(UICollectionView *collection, BOOL active)
     NSHashTable<UIView *> *owners = objc_getAssociatedObject(collection, kYTLGAvatarOwnerKey);
     if (!active && !owners) return;
     UIView *oldOwner = owners.anyObject;
-    UIView *owner = active ? collection : nil;
+    UIView *owner = nil;
+
     if (active) {
         CGFloat height = CGRectGetHeight(collection.bounds);
+
+        // Prefer a non-scrolling host immediately around the carousel so the
+        // glass tray stays fixed while the channel avatars scroll horizontally.
         UIView *parent = collection.superview;
-        for (NSUInteger depth = 0; parent && depth < 4; depth++, parent = parent.superview) {
-            CGFloat ph = CGRectGetHeight(parent.bounds), pw = CGRectGetWidth(parent.bounds);
-            if (ph > height + 20) break;
-            if (ph >= height - 4 && pw >= CGRectGetWidth(collection.bounds) &&
-                pw <= CGRectGetWidth(collection.window.bounds) + 1) owner = parent;
+        owner = parent ?: collection;
+
+        // Do not climb into the entire subscription header. The previous +20
+        // tolerance often selected a much taller owner, producing the large
+        // rectangular slab seen in the recording.
+        for (NSUInteger depth = 0;
+             parent && depth < 2;
+             depth++, parent = parent.superview) {
+            CGFloat ph = CGRectGetHeight(parent.bounds);
+            CGFloat pw = CGRectGetWidth(parent.bounds);
+
+            if (ph > height + 8.0) {
+                break;
+            }
+
+            if (ph >= height - 2.0 &&
+                pw >= CGRectGetWidth(collection.bounds) - 2.0 &&
+                pw <= CGRectGetWidth(collection.window.bounds) + 1.0) {
+                owner = parent;
+            }
         }
     }
     if (oldOwner && oldOwner != owner) YTLGRestoreSurface(oldOwner);
@@ -4712,14 +5269,21 @@ static void YTLGStyleAvatarCollection(UICollectionView *collection, BOOL active)
             YTLGRestoreSurface(collection);
         // Cover the common avatar/All row when available, with equal outer
         // margins. Preserve avatar sizes, labels and YouTube's scrolling.
-        YTLGApplySubscriptionGlass(owner, 16);
+        YTLGApplySubscriptionGlass(owner, 24);
     }
 }
 
 static void YTLGUpdateSubscriptionFilterHeaderGlass(UIView *header) {
-    if (!header.window || CGRectGetHeight(header.bounds) < 55 ||
-        CGRectGetHeight(header.bounds) > 240) return;
-    YTLGApplySubscriptionGlass(header, 20);
+    if (!header) return;
+
+    // The header previously received a second full-size glass sheet on top of
+    // the avatar tray, making the channel area look like one large grey block.
+    // Keep the header transparent: the avatar carousel and filter rail now each
+    // own a separate, purpose-sized native glass surface.
+    YTLGRestoreSurface(header);
+    header.opaque = NO;
+    header.backgroundColor = UIColor.clearColor;
+    header.layer.backgroundColor = UIColor.clearColor.CGColor;
 }
 
 static void YTLGObserveElementsSurfaces(UIView *view) {
